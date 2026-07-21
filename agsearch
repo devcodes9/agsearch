@@ -1,0 +1,756 @@
+#!/usr/bin/env python3
+"""
+agsearch — global full-text search across all your coding agent sessions.
+
+Claude Code and Codex CLI each store every session as local JSONL (~/.claude/projects/
+and ~/.codex/sessions/). Neither has cross-session search. This indexes all of them into
+one ranked search, shows the matched lines, and drops you straight back into the session
+with `claude --resume` or `codex resume`.
+
+Usage:
+    agsearch                       # interactive fuzzy TUI (needs fzf)
+    agsearch "stripe tax id"       # open the TUI pre-filtered to this query
+    agsearch -n "stripe tax id"    # non-interactive: print ranked matches, no fzf
+    agsearch --here "..."          # only sessions from the current directory's project
+    agsearch --project myapp       # only sessions whose path matches 'myapp'
+    agsearch --thinking            # also index assistant thinking blocks
+    agsearch --reindex             # force a full rebuild of the cache
+    agsearch _preview <sid> <seq> <thinking> <query...>   # (internal) fzf preview
+
+In the TUI the right pane previews the matched session, auto-scrolled to your match
+(marked ▶) with a "match N of M" header. Enter resumes the session (and copies your
+query to the clipboard, so ⌘F → ⌘V → Enter jumps to it inside the replayed transcript).
+
+Warm runs are near-instant: parsed sessions are cached per-file and only re-parsed
+when their .jsonl mtime changes.
+"""
+
+import os
+import re
+import sys
+import math
+import json
+import shlex
+import shutil
+import hashlib
+import subprocess
+
+HOME = os.path.expanduser("~")
+PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
+CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "agsearch")
+FRAG_DIR = os.path.join(CACHE_DIR, "frag")
+META_PATH = os.path.join(CACHE_DIR, "meta.json")
+SESSIONS_PATH = os.path.join(CACHE_DIR, "sessions.tsv")   # one line per session, for _filter
+SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subagent file paths]
+INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
+
+CACHE_FMT = 4   # bump when the TSV column layout / keying changes, to invalidate old fragments
+
+# TSV columns (tab-separated, one row per message):
+#   0 session_id  1 cwd  2 gitBranch  3 iso_date  4 role  5 seq  6 title  7 text
+SEP = "\t"
+
+# Preview layout: this many header lines print before the first message, so a message
+# with sequence `seq` lands on preview line HEADER_LINES + 1 + seq. Keep in sync with
+# render_preview() — the fzf scroll offset is computed from it.
+HEADER_LINES = 5
+
+
+# ------------------------------------------------------------------ parsing
+
+def _flatten_content(content):
+    """Pull human-readable text out of a message.content (str or block list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict):
+                t = b.get("type")
+                if t == "text" and b.get("text"):
+                    parts.append(b["text"])
+                elif t == "tool_result":
+                    parts.append(_flatten_content(b.get("content", "")))
+        return "\n".join(p for p in parts if p)
+    return ""
+
+
+def _single_line(s, limit=400):
+    return " ".join(s.split())[:limit]
+
+
+def parse_session(path, include_thinking=False):
+    """Parse one .jsonl file into ordered index rows (8-field lists, seq assigned).
+
+    Rows are keyed by each entry's `sessionId` field, not the filename. For normal sessions
+    those are identical; for `agent-*.jsonl` subagent transcripts the sessionId points to the
+    PARENT conversation, so subagent content folds into (and resumes) its parent session.
+    """
+    file_id = os.path.splitext(os.path.basename(path))[0]
+    session_id = file_id
+    title = ""
+    cwd = ""
+    branch = ""
+    entry = ""
+    rows = []   # each: [sid, cwd, branch, ts, role, title, text]
+    try:
+        fh = open(path, "r", errors="replace")
+    except OSError:
+        return session_id, []
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = o.get("type")
+            if t == "ai-title" and o.get("aiTitle"):
+                title = o["aiTitle"]
+                continue
+            if t not in ("user", "assistant"):
+                continue
+            session_id = o.get("sessionId") or session_id   # parent id for agent-* files
+            cwd = o.get("cwd", cwd)
+            branch = o.get("gitBranch", branch)
+            entry = o.get("entrypoint") or entry            # cli vs sdk-py/sdk-ts
+            msg = o.get("message", {}) or {}
+            role = msg.get("role", t)
+            ts = o.get("timestamp", "")
+
+            if t == "assistant" and include_thinking:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "thinking" and b.get("thinking"):
+                            rows.append([session_id, cwd, branch, ts, "thinking", title,
+                                         _single_line(b["thinking"])])
+
+            text = _single_line(_flatten_content(msg.get("content", "")))
+            if not text:
+                continue
+            rows.append([session_id, cwd, branch, ts, role, title, text])
+
+    # Titles can appear after the messages they label; backfill, then stamp sequence.
+    # `kind` marks who drove the session: your own CLI use vs a plugin/SDK-spawned run.
+    kind = "auto" if entry.startswith("sdk") else "cli"
+    final = []
+    for i, r in enumerate(rows):
+        final.append([r[0], r[1], r[2], r[3], r[4], str(i), title or r[5], r[6], kind])
+    return session_id, final
+
+
+_CODEX_NOISE = ("<environment_context>", "<permissions", "<multi_agent_mode>", "<user_instructions>")
+
+# Codex user messages often lead with injected preambles instead of the real task. Pick the
+# first message that's an actual request: strip a known security-preamble prefix, and skip
+# messages that are pure wrappers (AGENTS.md dumps, XML blocks, leftover preamble).
+_CODEX_PREAMBLE_ANCHOR = "repository code only."   # end of the injected security preamble
+_CODEX_SKIP_PREFIXES = ("<", "# agents.md", "agents.md instructions", "important: do not")
+
+
+def _codex_title(user_texts):
+    for t in user_texts:
+        t = t.strip()
+        if _CODEX_PREAMBLE_ANCHOR in t:            # real task is appended after the preamble
+            t = t.split(_CODEX_PREAMBLE_ANCHOR, 1)[1].strip()
+        if not t or t.lower().startswith(_CODEX_SKIP_PREFIXES):
+            continue                               # pure boilerplate → try the next message
+        return t[:90]
+    return ""
+
+
+def parse_codex_session(path, include_thinking=False):
+    """Parse an OpenAI Codex CLI rollout file into the same 8-field row schema as Claude.
+
+    Session id/cwd come from the `session_meta` entry; messages are `response_item` entries of
+    payload type "message" (roles user/assistant; `developer`/`system` and injected context are
+    dropped). Keyed by the meta `id` UUID, which is what `codex resume <id>` takes.
+    """
+    sid = os.path.splitext(os.path.basename(path))[0]
+    cwd = branch = ts0 = ""
+    rows = []
+    try:
+        fh = open(path, "r", errors="replace")
+    except OSError:
+        return sid, []
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = o.get("type")
+            if t == "session_meta":
+                p = o.get("payload", {}) or {}
+                sid = p.get("id") or p.get("session_id") or sid
+                cwd = p.get("cwd", cwd)
+                ts0 = p.get("timestamp", ts0)
+                g = p.get("git")
+                if isinstance(g, dict):
+                    branch = g.get("branch") or branch
+                continue
+            if t != "response_item":
+                continue
+            p = o.get("payload", {}) or {}
+            if p.get("type") != "message" or p.get("role") not in ("user", "assistant"):
+                continue
+            c = p.get("content")
+            if isinstance(c, str):
+                text = c
+            elif isinstance(c, list):
+                text = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("text"))
+            else:
+                text = ""
+            text = _single_line(text)
+            if not text or text.lstrip().startswith(_CODEX_NOISE):
+                continue
+            rows.append([sid, cwd, branch, o.get("timestamp") or ts0, p["role"], "", "", text])
+
+    title = _codex_title([r[7] for r in rows if r[4] == "user"])
+    final = [[sid, r[1], r[2], r[3], r[4], str(i), title, r[7], "cli"] for i, r in enumerate(rows)]
+    return sid, final
+
+
+# ------------------------------------------------------------------ cache
+
+def _frag_path(jsonl_path):
+    key = hashlib.sha1(jsonl_path.encode()).hexdigest()[:16]
+    return os.path.join(FRAG_DIR, key + ".tsv")
+
+
+def build_index(include_thinking=False, force=False):
+    """Return the full index as a list of TSV strings, refreshing per-file caches."""
+    os.makedirs(FRAG_DIR, exist_ok=True)
+    meta = {}
+    if os.path.exists(META_PATH) and not force:
+        try:
+            meta = json.load(open(META_PATH))
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+    if meta.get("_thinking") != include_thinking or meta.get("_fmt") != CACHE_FMT:
+        force = True          # thinking toggle or format change invalidates fragments
+        meta = {}
+
+    # Each source: (tag, root dir, parser). Add more agents here later (Cursor, Gemini…).
+    sources = [("cc", PROJECTS_DIR, parse_session), ("codex", CODEX_DIR, parse_codex_session)]
+    files = []                          # (path, source, parser)
+    for source, root, parser in sources:
+        if os.path.isdir(root):
+            for r, _dirs, fs in os.walk(root):
+                for fn in fs:
+                    if fn.endswith(".jsonl"):
+                        files.append((os.path.join(r, fn), source, parser))
+
+    new_meta = {"_thinking": include_thinking, "_fmt": CACHE_FMT}
+    live_frags = set()
+    lines = []
+    sub_map = {}                        # parent sid -> [subagent file paths] (Claude only)
+    index = {}                          # sid -> {source, path} for preview + resume routing
+    for path, source, parser in files:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        frag = _frag_path(path)
+        live_frags.add(os.path.basename(frag))
+        if not force and meta.get(path) == mtime and os.path.exists(frag):
+            with open(frag, errors="replace") as fh:
+                frag_lines = fh.read().splitlines()
+        else:
+            _sid, rows = parser(path, include_thinking)
+            frag_lines = [SEP.join(r) for r in rows]
+            with open(frag, "w") as fh:
+                fh.write("\n".join(frag_lines))
+        new_meta[path] = mtime
+        lines.extend(frag_lines)
+        if not frag_lines:
+            continue
+        sid0 = frag_lines[0].split(SEP, 1)[0]
+        base = os.path.basename(path)
+        if source == "cc" and base.startswith("agent-"):
+            sub_map.setdefault(sid0, []).append(path)     # subagent folds into parent
+        else:
+            index[sid0] = {"source": source, "path": path}
+
+    for fn in os.listdir(FRAG_DIR):     # drop fragments for deleted sessions
+        if fn not in live_frags:
+            try:
+                os.remove(os.path.join(FRAG_DIR, fn))
+            except OSError:
+                pass
+
+    json.dump(new_meta, open(META_PATH, "w"))
+    json.dump(sub_map, open(SUBMAP_PATH, "w"))
+    json.dump(index, open(INDEX_PATH, "w"))
+    return lines
+
+
+# ------------------------------------------------------------------ filtering
+
+def apply_scope(lines, here=False, project=None):
+    if here:
+        cwd = os.getcwd()
+        lines = [l for l in lines
+                 if l.split(SEP, 2)[1] == cwd or l.split(SEP, 2)[1].startswith(cwd + os.sep)]
+    if project:
+        p = project.lower()
+        lines = [l for l in lines if p in l.split(SEP, 2)[1].lower()]
+    return lines
+
+
+def rank_matches(lines, query):
+    """AND-of-terms substring filter, ranked by recency (iso date desc)."""
+    terms = [t.lower() for t in query.split()]
+    hits = [l for l in lines if all(t in l.lower() for t in terms)]
+    hits.sort(key=lambda l: l.split(SEP)[3], reverse=True)
+    return hits
+
+
+# ------------------------------------------------------------------ rendering
+
+def short_proj(cwd):
+    return os.path.basename(cwd.rstrip("/")) or cwd
+
+
+def _highlight(text, terms, code="\033[1;30;43m"):
+    """Bold-highlight each query term (case-insensitive, first occurrence per term)."""
+    for t in terms:
+        if not t:
+            continue
+        low = text.lower()
+        idx = low.find(t)
+        if idx >= 0:
+            text = text[:idx] + code + text[idx:idx + len(t)] + "\033[0m" + text[idx + len(t):]
+    return text
+
+
+def fmt_row(l):
+    f = (l.split(SEP) + [""] * 8)[:8]
+    sid, cwd, branch, ts, role, seq, title, text = f
+    tag = {"user": "you", "assistant": "cc", "thinking": "th"}.get(role, role)
+    return f"{ts[:10]}  {short_proj(cwd)[:18]:<18}  {tag:<3} {title[:32]:<32} │ {text}"
+
+
+def print_matches(lines, query, limit=40):
+    hits = rank_matches(lines, query) if query else lines
+    if not hits:
+        print("No matches.", file=sys.stderr)
+        return 1
+    for l in hits[:limit]:
+        print(fmt_row(l))
+    extra = len(hits) - limit
+    if extra > 0:
+        print(f"... and {extra} more (narrow the query or use the fzf TUI).", file=sys.stderr)
+    return 0
+
+
+def _session_path(sid):
+    if os.path.isdir(PROJECTS_DIR):
+        for root, _dirs, files in os.walk(PROJECTS_DIR):
+            if sid + ".jsonl" in files:
+                return os.path.join(root, sid + ".jsonl")
+    return None
+
+
+def _label(role):
+    return {"user": "\033[36myou\033[0m", "assistant": "\033[32mcc \033[0m",
+            "thinking": "\033[90mth \033[0m"}.get(role, (role + "   ")[:3])
+
+
+def _snippet(text, terms, width=200):
+    """A window of text centered on the first matching term, highlighted."""
+    lo = text.lower()
+    pos = min([lo.find(t) for t in terms if t and t in lo] or [0])
+    start = max(0, pos - 40)
+    frag = text[start:start + width]
+    if start:
+        frag = "…" + frag
+    return _highlight(frag, terms)
+
+
+def render_preview(sid, thinking, query):
+    """Compact preview card for one session (no full transcript — that's what resume is for).
+
+    With a query: the matched lines only, highlighted. Without one: the bookends (first prompt
+    + last message) so you know what it was about. Merges subagent transcripts (tagged ⤷) so
+    their content is previewable too. Re-runs per keystroke via fzf's {q}.
+    """
+    thinking = str(thinking) == "1"
+    try:
+        index = json.load(open(INDEX_PATH))
+    except (OSError, json.JSONDecodeError):
+        index = {}
+    info = index.get(sid, {})
+    source = info.get("source", "cc")
+    path = info.get("path") or _session_path(sid)
+
+    # Gather (row, is_subagent) pairs. Codex sessions have no subagents; Claude folds them in.
+    tagged = []
+    if source == "codex":
+        if path:
+            _s, rows0 = parse_codex_session(path, include_thinking=thinking)
+            tagged = [(r, False) for r in rows0]
+    else:
+        if path:
+            _s, prows = parse_session(path, include_thinking=thinking)
+            tagged += [(r, False) for r in prows]
+        try:
+            submap = json.load(open(SUBMAP_PATH))
+        except (OSError, json.JSONDecodeError):
+            submap = {}
+        for sp in submap.get(sid, [])[:40]:
+            _s, srows = parse_session(sp, include_thinking=thinking)
+            tagged += [(r, True) for r in srows]
+    if not tagged:
+        print("(session not found)")
+        return
+    tagged.sort(key=lambda x: x[0][3])   # chronological by timestamp
+    rows = [r for r, _ in tagged]
+
+    terms = [t.lower() for t in query.split()]
+    r0 = rows[0]
+    n_sub = sum(1 for _, sub in tagged if sub)
+    disp_title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
+    print(f"\033[1m{disp_title[:80]}\033[0m")
+    print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
+          + (f" · {n_sub} subagent" if n_sub else "") + "\033[0m")
+
+    if terms:
+        # Only the matched lines with a bit of context — not the whole transcript.
+        matches = [(r, sub) for r, sub in tagged if all(t in r[7].lower() for t in terms)]
+        print(f"\n\033[1;33m● {len(matches)} match(es)\033[0m")
+        for r, sub in matches[:6]:
+            tag = "\033[35m⤷\033[0m" if sub else " "
+            print(f"{tag}{_label(r[4])} {_snippet(r[7], terms, 200)}")
+        if len(matches) > 6:
+            print(f"  \033[2m… {len(matches) - 6} more (resume to read)\033[0m")
+    else:
+        # No query yet: just the bookends so you know what the session was about.
+        first_user = next((r for r, _ in tagged if r[4] == "user"), None)
+        if first_user:
+            print(f"\n\033[2mopened with\033[0m  {_snippet(first_user[7], [], 220)}")
+        print(f"\033[2mlast\033[0m  {_label(rows[-1][4])} {_snippet(rows[-1][7], [], 220)}")
+
+
+# ------------------------------------------------------------------ resume
+
+def _die(msg):
+    """Show an error and hold the window open — otherwise the popup just vanishes."""
+    print(f"\n\033[31m{msg}\033[0m\n", file=sys.stderr)
+    try:
+        input("press enter to close ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    sys.exit(1)
+
+
+def resume(sid, cwd, query=""):
+    if query:
+        try:                                        # stash query so ⌘F finds it in-session
+            subprocess.run(["pbcopy"], input=query, text=True, check=False)
+        except OSError:
+            pass
+    try:
+        source = json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
+    except (OSError, json.JSONDecodeError):
+        source = "cc"
+    bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
+        else ("claude", ["claude", "--resume", sid])
+
+    # Leave a trace: if the launched CLI dies instantly the popup window vanishes with it,
+    # so this log is the only way to see what was attempted.
+    note = f"cd {cwd} && {' '.join(argv)}"
+    try:
+        with open(os.path.join(CACHE_DIR, "last-resume.log"), "a") as fh:
+            fh.write(f"{note}   [source={source} cwd_exists={os.path.isdir(cwd or '')}]\n")
+    except OSError:
+        pass
+
+    if not shutil.which(bin_):
+        _die(f"{bin_} CLI not found on PATH.\nRun manually:\n  {note}")
+    if cwd and not os.path.isdir(cwd):
+        _die(f"Session's directory no longer exists:\n  {cwd}\n\n{bin_} needs it to resume.")
+    if cwd:
+        os.chdir(cwd)
+    os.execvp(bin_, argv)                            # replace this process
+
+
+# ------------------------------------------------------------------ fzf TUI
+
+def group_sessions(lines):
+    """Collapse per-message index rows into one entry per session, newest first."""
+    by = {}
+    for l in lines:
+        f = (l.split(SEP) + [""] * 9)[:9]
+        sid, cwd, _branch, ts, _role, _seq, title, text, kind = f
+        g = by.get(sid)
+        if g is None:
+            g = by[sid] = {"sid": sid, "cwd": cwd, "date": ts, "title": title,
+                           "first_user": "", "kind": kind or "cli", "texts": []}
+        if ts > g["date"]:
+            g["date"] = ts
+        if cwd:
+            g["cwd"] = cwd
+        if kind == "cli":
+            g["kind"] = "cli"                # a real CLI turn outranks folded-in agent rows
+        if title and not g["title"]:
+            g["title"] = title
+        if _role == "user" and not g["first_user"]:
+            g["first_user"] = text
+        g["texts"].append(text)
+    sessions = list(by.values())
+    for s in sessions:                       # fall back to the first prompt when untitled
+        if not s["title"]:
+            s["title"] = s["first_user"] or "(untitled)"
+    sessions.sort(key=lambda s: s["date"], reverse=True)
+    return sessions
+
+
+def build_sessions(lines):
+    """Write one line per session to SESSIONS_PATH (sid, cwd, date, source, kind, title, blob)."""
+    try:
+        index = json.load(open(INDEX_PATH))
+    except (OSError, json.JSONDecodeError):
+        index = {}
+    out = []
+    for s in group_sessions(lines):
+        source = index.get(s["sid"], {}).get("source", "cc")
+        title = _single_line(s["title"] or "(untitled)", 90)
+        # High cap so full sessions (incl. folded-in subagent content) stay searchable.
+        blob = _single_line(" · ".join(s["texts"]), 2_000_000)
+        out.append(SEP.join([s["sid"], s["cwd"], s["date"][:10], source, s["kind"], title, blob]))
+    with open(SESSIONS_PATH, "w") as fh:
+        fh.write("\n".join(out))
+
+
+# Common words that add noise, not signal, to a search ("migration OF alibrary").
+_STOP = {"of", "the", "a", "an", "to", "for", "in", "on", "and", "or", "is", "it", "this",
+         "that", "with", "from", "by", "at", "as", "be", "are", "was", "were", "how", "do",
+         "i", "my", "me", "we", "you", "about", "into", "using", "use", "some", "any"}
+
+def _stem(w):
+    """Conservative inflectional stem: strip one reliable suffix only if a solid (>=5 char)
+    root remains, so migration/migrate/migrating -> 'migrat' while running stays 'running'
+    (better to under-stem than to produce junk roots like 'oper' or 'runn')."""
+    for suf in ("ing", "ion", "ed", "es", "e", "s"):
+        if w.endswith(suf) and len(w) - len(suf) >= 5:
+            return w[:-len(suf)]
+    return w
+
+
+def _fuzzy_span(hay, term):
+    """Greedy first subsequence match; returns its character span, or None (last-resort typo tier)."""
+    i = start = 0
+    for ci, c in enumerate(hay):
+        if c == term[i]:
+            if i == 0:
+                start = ci
+            i += 1
+            if i == len(term):
+                return ci - start + 1
+    return None
+
+
+_SRC_MARK = {"cc": "\033[34mcc  \033[0m", "codex": "\033[35mcx  \033[0m"}
+_AUTO_MARK = "\033[90mauto\033[0m"          # plugin/SDK-spawned run, never your own typing
+
+
+def _row(sid, cwd, date, source, kind, title, badge):
+    mark = _AUTO_MARK if kind == "auto" else _SRC_MARK.get(source, "    ")
+    body = f"{date}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  {badge} {title[:64]}"
+    if kind == "auto":
+        body = f"\033[2m{date}  \033[0m{_AUTO_MARK}\033[2m  {short_proj(cwd)[:15]:<15}  {badge} {title[:64]}\033[0m"
+    return SEP.join([sid, cwd, body])
+
+
+def _smart_rows(rows, qterms):
+    """BM25-lite ranking. For each query term (matched by its conservative stem) a session
+    scores idf * (title_boost + saturated term-frequency), so distinctive words and sessions
+    that actually discuss the term at length win, instead of any session that mentions it once.
+    A term that exists nowhere as text (a typo like 'alibrry') falls back to subsequence match.
+    Badge = matched/total. Ranked by score, not raw coverage, so the top rows are truly relevant.
+    """
+    total = len(qterms)
+    n = len(rows) or 1
+    keys = [stem if len(stem) >= 3 else term for term, stem in qterms]
+
+    # Pass 1: per-session term frequency + title hit, and document frequency per term.
+    data = []
+    df = dict.fromkeys(keys, 0)
+    for f in rows:
+        title_hay = (f[5] + " " + short_proj(f[1])).lower()
+        body_hay = f[6].lower()
+        rec = []
+        for key in keys:
+            tf = body_hay.count(key)
+            it = key in title_hay
+            if tf or it:
+                df[key] += 1
+            rec.append((tf, it))
+        data.append((f, title_hay, body_hay, rec))
+
+    idf = {k: math.log(1 + n / (1 + df[k])) for k in df}
+    typo = {k for k in df if df[k] <= 2}            # word barely exists → probably a typo, fuzzy it
+
+    scored = []
+    for f, title_hay, body_hay, rec in data:
+        score = 0.0
+        matched = 0
+        for (term, _stem_unused), key, (tf, it) in zip(qterms, keys, rec):
+            if tf or it:
+                matched += 1
+                score += idf[key] * (1.5 * it + 2.0 * tf / (tf + 1.5))
+            elif key in typo:
+                if _fuzzy_span(title_hay, term) is not None:
+                    matched += 1
+                    score += 1.0
+                else:
+                    sp = _fuzzy_span(body_hay, term)
+                    if sp is not None and sp <= len(term) * 3:
+                        matched += 1
+                        score += 0.3
+        if matched:
+            scored.append((score, matched, f))
+    # Categorise first: your own sessions always outrank plugin/SDK-spawned runs. Then
+    # coverage (matched all your words), then relevance. Automation is demoted, never hidden.
+    scored.sort(key=lambda x: (x[2][4] == "auto", -x[1], -x[0]))
+    return [_row(f[0], f[1], f[2], f[3], f[4], f[5], f"\033[33m{m}/{total}\033[0m")
+            for _score, m, f in scored[:200]]
+
+
+def cmd_filter(argv):
+    """fzf reload target: print CLEAN session rows ranked for the live query.
+
+    Search happens here (fzf runs --disabled), so the list shows only `date · project · N/T ·
+    title` while full conversation text is searched. Smart ranking: stopwords dropped, words
+    stemmed (migration≈migrate), matched per-concept (exact→stem→typo), ranked by coverage.
+    """
+    query = " ".join(argv[1:]) if argv else ""
+    words = re.findall(r"[a-z0-9]+", query.lower())
+    qwords = [w for w in words if w not in _STOP] or words   # keep stopwords if that's all
+    qterms = [(w, _stem(w)) for w in qwords]
+    try:
+        raw = open(SESSIONS_PATH, errors="replace").read().splitlines()
+    except OSError:
+        return
+    rows = [line.split(SEP) for line in raw if line.count(SEP) >= 6]
+
+    if not qterms:                                  # initial list: yours first, then automation
+        rows = sorted(rows, key=lambda f: f[4] == "auto")
+        out = [_row(f[0], f[1], f[2], f[3], f[4], f[5], "    ") for f in rows]
+    else:
+        out = _smart_rows(rows, qterms)
+    sys.stdout.write("\n".join(out))
+
+
+def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
+    if not shutil.which("fzf"):
+        print("fzf not installed. Falling back to non-interactive output.\n"
+              "Install with: brew install fzf\n", file=sys.stderr)
+        return print_matches(lines, query)
+
+    self = os.path.abspath(__file__)
+    build_sessions(lines)                # refresh the per-session cache _filter reads
+    thi = "1" if thinking else "0"
+    fz = "1" if fuzzy else "0"
+    filter_cmd = "python3 {} _filter {} {{q}}".format(shlex.quote(self), fz)
+    preview = "python3 {} _preview {{1}} {} {{q}}".format(shlex.quote(self), thi)
+    args = [
+        "fzf", "--ansi", "--delimiter", SEP, "--with-nth", "3", "--disabled",
+        "--print-query",                 # so the clipboard gets what you actually typed
+        "--bind", "start:reload:" + filter_cmd,
+        "--bind", "change:reload:" + filter_cmd,
+        "--preview", preview,
+        "--preview-window", "right,58%,wrap",
+        "--header", "type to search all sessions · enter: resume (copies query for ⌘F) · ctrl-/: preview",
+        "--bind", "ctrl-/:toggle-preview",
+    ]
+    if query:
+        args += ["--query", query]
+    proc = subprocess.run(args, input="", text=True, capture_output=True)
+    out = proc.stdout.split("\n")
+    typed = out[0] if out else query     # --print-query puts the final query on line 1
+    sel = next((l for l in out[1:] if l.strip()), "")
+    if not sel:
+        return 0
+    f = sel.split(SEP)
+    sid, cwd = f[0], f[1]
+    if no_resume:
+        print(f"cd {cwd} && claude --resume {sid}")
+        return 0
+    resume(sid, cwd, typed)
+    return 0
+
+
+# ------------------------------------------------------------------ main
+
+def main(argv):
+    if argv and argv[0] == "_preview":
+        sid = argv[1] if len(argv) > 1 else ""
+        thinking = argv[2] if len(argv) > 2 else "0"
+        query = " ".join(argv[3:])
+        render_preview(sid, thinking, query)
+        return 0
+    if argv and argv[0] == "_filter":
+        cmd_filter(argv[1:])
+        return 0
+
+    no_fzf = no_resume = here = thinking = reindex = fuzzy = False
+    project = None
+    query_parts = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-n", "--no-fzf"):
+            no_fzf = True
+        elif a == "--no-resume":
+            no_resume = True
+        elif a == "--here":
+            here = True
+        elif a == "--thinking":
+            thinking = True
+        elif a == "--fuzzy":
+            fuzzy = True
+        elif a == "--reindex":
+            reindex = True
+        elif a in ("-p", "--project"):
+            i += 1
+            project = argv[i] if i < len(argv) else None
+        elif a in ("-h", "--help"):
+            print(__doc__)
+            return 0
+        else:
+            query_parts.append(a)
+        i += 1
+
+    query = " ".join(query_parts)
+    lines = build_index(include_thinking=thinking, force=reindex)
+    lines = apply_scope(lines, here=here, project=project)
+    if not lines:
+        print("No indexed sessions found.", file=sys.stderr)
+        return 1
+
+    if no_fzf:
+        return print_matches(lines, query)
+    return run_fzf(lines, query, thinking=thinking, no_resume=no_resume, fuzzy=fuzzy)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception:                       # never let the popup vanish without a reason
+        import traceback
+        _die("agsearch crashed:\n\n" + traceback.format_exc())
