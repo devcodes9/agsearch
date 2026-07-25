@@ -445,8 +445,9 @@ def render_preview(sid, thinking, query):
     n_sub = sum(1 for _, sub in tagged if sub)
     disp_title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
     print(f"\033[1m{disp_title[:80]}\033[0m")
+    gone = " · orig dir gone" if r0[1] and not os.path.isdir(r0[1]) else ""
     print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
-          + (f" · {n_sub} subagent" if n_sub else "") + "\033[0m")
+          + (f" · {n_sub} subagent" if n_sub else "") + gone + "\033[0m")
 
     if terms:
         # Only the matched lines with a bit of context — not the whole transcript.
@@ -639,6 +640,9 @@ def _fuzzy_span(hay, term):
 _SRC_MARK = {"cc": "\033[34mcc  \033[0m", "codex": "\033[35mcx  \033[0m"}
 _AUTO_MARK = "\033[90mauto\033[0m"          # plugin/SDK-spawned run, never your own typing
 _LIVE_MARK = "\033[1;31m●\033[0m "           # session still being written to → probably running
+# Informational only: the session still resumes (from the nearest surviving ancestor dir),
+# so this is muted enough to read as a footnote rather than a warning.
+_GONE_MARK = "  \033[2morig dir gone\033[0m"
 
 
 def _active_sids(sids):
@@ -665,13 +669,25 @@ def _active_sids(sids):
     return live
 
 
-def _row(sid, cwd, date, source, kind, title, badge, active=False):
+def _missing_dirs(cwds):
+    """Which of these recorded working directories no longer exist. Deduped before stat'ing,
+    since a project's sessions all share one dir."""
+    gone = set()
+    for cwd in set(cwds):
+        if cwd and not os.path.isdir(cwd):
+            gone.add(cwd)
+    return gone
+
+
+def _row(sid, cwd, date, source, kind, title, badge, active=False, dir_gone=False):
     mark = _AUTO_MARK if kind == "auto" else _SRC_MARK.get(source, "    ")
     live = _LIVE_MARK if active else "  "
-    body = f"{date}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  {badge} {live}{title[:64]}"
+    tail = _GONE_MARK if dir_gone else ""
+    body = (f"{date}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  "
+            f"{badge} {live}{title[:64]}{tail}")
     if kind == "auto":
         body = (f"\033[2m{date}  \033[0m{_AUTO_MARK}\033[2m  {short_proj(cwd)[:15]:<15}  "
-                f"{badge} \033[0m{live}\033[2m{title[:64]}\033[0m")
+                f"{badge} \033[0m{live}\033[2m{title[:64]}\033[0m{tail}")
     return SEP.join([sid, cwd, body, "1" if active else "0"])
 
 
@@ -784,11 +800,11 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     return scored
 
 
-def _smart_rows(rows, qterms, live=frozenset(), usage=None):
+def _smart_rows(rows, qterms, live=frozenset(), usage=None, gone=frozenset()):
     """Render the ranked sessions as fzf rows. Badge = matched/total query terms."""
     total = len(qterms)
     return [_row(f[C_SID], f[C_CWD], f[C_DATE], f[C_SOURCE], f[C_KIND], f[C_TITLE],
-                 f"\033[33m{m}/{total}\033[0m", f[C_SID] in live)
+                 f"\033[33m{m}/{total}\033[0m", f[C_SID] in live, f[C_CWD] in gone)
             for _score, m, f in rank_sessions(rows, qterms, usage)[:200]]
 
 
@@ -815,12 +831,13 @@ def cmd_filter(argv):
     rows = [line.split(SEP) for line in raw if line.count(SEP) >= SESSION_COLS - 1]
 
     live = _active_sids([f[C_SID] for f in rows])
+    gone = _missing_dirs([f[C_CWD] for f in rows])
     if not qterms:                                  # initial list: yours first, then automation
         rows = sorted(rows, key=lambda f: f[C_KIND] == "auto")
         out = [_row(f[C_SID], f[C_CWD], f[C_DATE], f[C_SOURCE], f[C_KIND], f[C_TITLE], "    ",
-                    f[C_SID] in live) for f in rows]
+                    f[C_SID] in live, f[C_CWD] in gone) for f in rows]
     else:
-        out = _smart_rows(rows, qterms, live, _usage_counts())
+        out = _smart_rows(rows, qterms, live, _usage_counts(), gone)
     sys.stdout.write("\n".join(out))
 
 
@@ -844,7 +861,7 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
         "--preview", preview,
         "--preview-window", "right,58%,wrap",
         "--header", "type to search all sessions · enter: resume (copies query for ⌘F) · "
-                    "ctrl-/: preview · ● = live session",
+                    "ctrl-/: preview · ● = live session · 'orig dir gone' still resumes",
         "--bind", "ctrl-/:toggle-preview",
     ]
     if query:
