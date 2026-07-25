@@ -20,6 +20,8 @@ Usage:
 In the TUI the right pane previews the matched session, auto-scrolled to your match
 (marked ▶) with a "match N of M" header. Enter resumes the session (and copies your
 query to the clipboard, so ⌘F → ⌘V → Enter jumps to it inside the replayed transcript).
+Resume is id-based: a session whose project dir was deleted still resumes, from the nearest
+surviving ancestor dir. Sessions that still look live are marked ● and confirm before resuming.
 
 Warm runs are near-instant: parsed sessions are cached per-file and only re-parsed
 when their .jsonl mtime changes.
@@ -31,6 +33,7 @@ import sys
 import math
 import json
 import shlex
+import time
 import shutil
 import hashlib
 import subprocess
@@ -55,6 +58,10 @@ SEP = "\t"
 # with sequence `seq` lands on preview line HEADER_LINES + 1 + seq. Keep in sync with
 # render_preview() — the fzf scroll offset is computed from it.
 HEADER_LINES = 5
+
+# A session whose transcript was appended to this recently is almost certainly still running
+# (an agent mid-turn, or a CLI you have open in another tab). Marked ● live in the list.
+ACTIVE_WINDOW_SEC = 180
 
 
 # ------------------------------------------------------------------ parsing
@@ -453,7 +460,43 @@ def _die(msg):
     sys.exit(1)
 
 
-def resume(sid, cwd, query=""):
+def _nearest_existing_dir(path):
+    """Closest existing ancestor of `path` (the path itself if it exists), else $HOME.
+
+    Worktrees get deleted, but `claude --resume <id>` / `codex resume <id>` are id-based and
+    don't need the original directory — so a dead cwd is a reason to relocate, not to abort.
+    """
+    p = os.path.abspath(os.path.expanduser(path)) if path else ""
+    while p and p != os.sep:
+        if os.path.isdir(p):
+            return p
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    if os.path.isdir(os.sep) and not os.path.isdir(HOME):
+        return os.sep
+    return HOME
+
+
+def _confirm_active(sid, bin_):
+    """Warn that a session still looks live, and ask before attaching. Never hard-blocks:
+    with no tty to prompt on (fzf popup, piped run) it warns and proceeds."""
+    warn = (f"\033[33m⚠ this session looks active (written to in the last "
+            f"{ACTIVE_WINDOW_SEC}s) — resuming may collide with the running {bin_}.\033[0m")
+    print(warn, file=sys.stderr)
+    if not sys.stdin.isatty():
+        return True
+    try:
+        ok = input("resume anyway? [Y/n] ").strip().lower() in ("", "y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return True
+    if not ok:
+        print("aborted.", file=sys.stderr)
+    return ok
+
+
+def resume(sid, cwd, query="", active=False):
     if query:
         try:                                        # stash query so ⌘F finds it in-session
             subprocess.run(["pbcopy"], input=query, text=True, check=False)
@@ -466,21 +509,33 @@ def resume(sid, cwd, query=""):
     bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
         else ("claude", ["claude", "--resume", sid])
 
+    # The recorded worktree may be long gone. Resume is id-based, so relocate to the nearest
+    # surviving ancestor (or $HOME) instead of refusing to launch.
+    cwd_exists = bool(cwd) and os.path.isdir(cwd)
+    target = cwd if cwd_exists else (_nearest_existing_dir(cwd) if cwd else "")
+
     # Leave a trace: if the launched CLI dies instantly the popup window vanishes with it,
     # so this log is the only way to see what was attempted.
-    note = f"cd {cwd} && {' '.join(argv)}"
+    note = f"cd {target or cwd} && {' '.join(argv)}"
     try:
         with open(os.path.join(CACHE_DIR, "last-resume.log"), "a") as fh:
-            fh.write(f"{note}   [source={source} cwd_exists={os.path.isdir(cwd or '')}]\n")
+            fh.write(f"{note}   [source={source} cwd_exists={cwd_exists}"
+                     f" orig_cwd={cwd or '-'} fallback={'-' if cwd_exists else (target or '-')}"
+                     f" active={bool(active)}]\n")
     except OSError:
         pass
 
     if not shutil.which(bin_):
         _die(f"{bin_} CLI not found on PATH.\nRun manually:\n  {note}")
-    if cwd and not os.path.isdir(cwd):
-        _die(f"Session's directory no longer exists:\n  {cwd}\n\n{bin_} needs it to resume.")
-    if cwd:
-        os.chdir(cwd)
+    if cwd and not cwd_exists:
+        print(f"\033[33moriginal dir gone ({cwd}), resuming from {target}\033[0m", file=sys.stderr)
+    if active and not _confirm_active(sid, bin_):
+        return
+    if target:
+        try:
+            os.chdir(target)
+        except OSError:                              # raced away between check and chdir
+            os.chdir(HOME)
     os.execvp(bin_, argv)                            # replace this process
 
 
@@ -562,17 +617,44 @@ def _fuzzy_span(hay, term):
 
 _SRC_MARK = {"cc": "\033[34mcc  \033[0m", "codex": "\033[35mcx  \033[0m"}
 _AUTO_MARK = "\033[90mauto\033[0m"          # plugin/SDK-spawned run, never your own typing
+_LIVE_MARK = "\033[1;31m●\033[0m "           # session still being written to → probably running
 
 
-def _row(sid, cwd, date, source, kind, title, badge):
+def _active_sids(sids):
+    """Subset of `sids` whose transcript — or one of its subagent transcripts — was appended to
+    within ACTIVE_WINDOW_SEC, i.e. the session still looks live."""
+    try:
+        index = json.load(open(INDEX_PATH))
+    except (OSError, json.JSONDecodeError):
+        index = {}
+    try:
+        submap = json.load(open(SUBMAP_PATH))
+    except (OSError, json.JSONDecodeError):
+        submap = {}
+    now = time.time()
+    live = set()
+    for sid in sids:
+        for p in [index.get(sid, {}).get("path")] + submap.get(sid, [])[:40]:
+            try:
+                if p and now - os.path.getmtime(p) <= ACTIVE_WINDOW_SEC:
+                    live.add(sid)
+                    break
+            except OSError:
+                continue
+    return live
+
+
+def _row(sid, cwd, date, source, kind, title, badge, active=False):
     mark = _AUTO_MARK if kind == "auto" else _SRC_MARK.get(source, "    ")
-    body = f"{date}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  {badge} {title[:64]}"
+    live = _LIVE_MARK if active else "  "
+    body = f"{date}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  {badge} {live}{title[:64]}"
     if kind == "auto":
-        body = f"\033[2m{date}  \033[0m{_AUTO_MARK}\033[2m  {short_proj(cwd)[:15]:<15}  {badge} {title[:64]}\033[0m"
-    return SEP.join([sid, cwd, body])
+        body = (f"\033[2m{date}  \033[0m{_AUTO_MARK}\033[2m  {short_proj(cwd)[:15]:<15}  "
+                f"{badge} \033[0m{live}\033[2m{title[:64]}\033[0m")
+    return SEP.join([sid, cwd, body, "1" if active else "0"])
 
 
-def _smart_rows(rows, qterms):
+def _smart_rows(rows, qterms, live=frozenset()):
     """BM25-lite ranking. For each query term (matched by its conservative stem) a session
     scores idf * (title_boost + saturated term-frequency), so distinctive words and sessions
     that actually discuss the term at length win, instead of any session that mentions it once.
@@ -623,7 +705,8 @@ def _smart_rows(rows, qterms):
     # Categorise first: your own sessions always outrank plugin/SDK-spawned runs. Then
     # coverage (matched all your words), then relevance. Automation is demoted, never hidden.
     scored.sort(key=lambda x: (x[2][4] == "auto", -x[1], -x[0]))
-    return [_row(f[0], f[1], f[2], f[3], f[4], f[5], f"\033[33m{m}/{total}\033[0m")
+    return [_row(f[0], f[1], f[2], f[3], f[4], f[5], f"\033[33m{m}/{total}\033[0m",
+                 f[0] in live)
             for _score, m, f in scored[:200]]
 
 
@@ -644,11 +727,12 @@ def cmd_filter(argv):
         return
     rows = [line.split(SEP) for line in raw if line.count(SEP) >= 6]
 
+    live = _active_sids([f[0] for f in rows])
     if not qterms:                                  # initial list: yours first, then automation
         rows = sorted(rows, key=lambda f: f[4] == "auto")
-        out = [_row(f[0], f[1], f[2], f[3], f[4], f[5], "    ") for f in rows]
+        out = [_row(f[0], f[1], f[2], f[3], f[4], f[5], "    ", f[0] in live) for f in rows]
     else:
-        out = _smart_rows(rows, qterms)
+        out = _smart_rows(rows, qterms, live)
     sys.stdout.write("\n".join(out))
 
 
@@ -671,7 +755,8 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
         "--bind", "change:reload:" + filter_cmd,
         "--preview", preview,
         "--preview-window", "right,58%,wrap",
-        "--header", "type to search all sessions · enter: resume (copies query for ⌘F) · ctrl-/: preview",
+        "--header", "type to search all sessions · enter: resume (copies query for ⌘F) · "
+                    "ctrl-/: preview · ● = live session",
         "--bind", "ctrl-/:toggle-preview",
     ]
     if query:
@@ -682,12 +767,12 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     sel = next((l for l in out[1:] if l.strip()), "")
     if not sel:
         return 0
-    f = sel.split(SEP)
-    sid, cwd = f[0], f[1]
+    f = (sel.split(SEP) + [""] * 4)[:4]
+    sid, cwd, active = f[0], f[1], f[3] == "1"
     if no_resume:
         print(f"cd {cwd} && claude --resume {sid}")
         return 0
-    resume(sid, cwd, typed)
+    resume(sid, cwd, typed, active=active)
     return 0
 
 
