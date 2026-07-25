@@ -71,6 +71,13 @@ searchable). The right pane is a **compact preview card**, not a transcript dump
 shows only the matched lines (highlighted); with no query, the bookends (first prompt + last message)
 so you know what the session was about. Full reading is what **resume** is for.
 
+**Snippets are cleaned, not raw.** Transcripts are full of things nobody wants to read in a result
+row, so every snippet strips markdown noise (fences, headings, bullets, emphasis, link syntax) and
+condenses payloads — JSON dumps, `cat -n` file reads, pasted images, long opaque tokens — into short
+`[json]` / `[file]` / `[image]` placeholders, on one fixed-width line. Search still runs over the
+raw text, and if your term only exists inside a condensed payload the raw line is shown instead:
+a snippet always contains the word you searched for, highlighted.
+
 **Sessions are categorised, not filtered.** Claude Code records how each session started
 (`entrypoint`): `cli` = you typed it, `sdk-py`/`sdk-ts` = spawned by a plugin or SDK process
 (e.g. the security-guidance plugin's Stop hook, which opens a fresh session per git diff). Your

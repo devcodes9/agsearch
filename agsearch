@@ -357,11 +357,15 @@ def _highlight(text, terms, code="\033[1;30;43m"):
     return text
 
 
-def fmt_row(l):
+ROW_TEXT_WIDTH = 160        # keeps -n rows one terminal line each, however big the message was
+
+
+def fmt_row(l, terms=()):
     f = (l.split(SEP) + [""] * 8)[:8]
     sid, cwd, branch, ts, role, seq, title, text = f
     tag = {"user": "you", "assistant": "cc", "thinking": "th"}.get(role, role)
-    return f"{ts[:10]}  {short_proj(cwd)[:18]:<18}  {tag:<3} {title[:32]:<32} │ {text}"
+    body = _snippet(text, [t for t in terms if t], ROW_TEXT_WIDTH)
+    return f"{ts[:10]}  {short_proj(cwd)[:18]:<18}  {tag:<3} {title[:32]:<32} │ {body}"
 
 
 def print_matches(lines, query, limit=40):
@@ -369,8 +373,9 @@ def print_matches(lines, query, limit=40):
     if not hits:
         print("No matches.", file=sys.stderr)
         return 1
+    terms = [t.lower() for t in query.split()]
     for l in hits[:limit]:
-        print(fmt_row(l))
+        print(fmt_row(l, terms))
     extra = len(hits) - limit
     if extra > 0:
         print(f"... and {extra} more (narrow the query or use the fzf TUI).", file=sys.stderr)
@@ -390,15 +395,133 @@ def _label(role):
             "thinking": "\033[90mth \033[0m"}.get(role, (role + "   ")[:3])
 
 
+# --- snippet cleanup: transcripts are full of payloads nobody wants to read in a result row.
+_IMAGE_RE = re.compile(r"\[Image:[^\]]*\]")
+_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+.-]*.*?```", re.S)      # closed fence
+_OPEN_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+.-]*.*", re.S)     # fence cut off by the 400-char cap
+_MD_LINK_RE = re.compile(r"!?\[([^\]\n]{1,80})\]\([^)\s]*\)")   # [text](url) -> text
+_MD_CODESPAN_RE = re.compile(r"`+([^`]+)`+")
+# Emphasis markers only count when they stand alone — otherwise a C-style /** comment */ or a
+# glob pattern gets shredded into gibberish.
+_MD_BOLD_RE = re.compile(r"(?<![\w/*])(\*\*|__)(?!\s)(.+?)(?<!\s)\1(?![\w/*])", re.S)
+_MD_ITALIC_RE = re.compile(r"(?<![\w/*])\*(?!\s)([^*/\n]{1,160}?)(?<!\s)\*(?![\w/*])")
+_MD_HEADING_RE = re.compile(r"(?:^|(?<= ))#{1,6}\s+")
+# Newlines are already collapsed by index time, so a mid-string "- " is ambiguous with a dash in
+# prose. Only strip one when it introduces a bold/heading run — the shape list items actually have.
+_MD_BULLET_RE = re.compile(r"(?:^|(?<= ))[-*+•]\s+(?=\*\*|#{1,6}\s)")
+_MD_LEAD_LIST_RE = re.compile(r"^\s*(?:[-*+•]|\d+\.|>)\s+")
+_LONG_TOKEN_RE = re.compile(r"\S{45,}")
+
+
+def _condense_json(s, minlen=40):
+    """Replace embedded JSON objects/arrays with a [json] placeholder. Hand-scanned rather than
+    regexed because these dumps nest, and they're routinely truncated mid-structure."""
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        nxt = s[i + 1:i + 3].lstrip()[:1]
+        if c in "[{" and nxt in ('"', "{", "["):
+            j, depth, in_str, esc = i, 0, False, False
+            while j < n:
+                ch = s[j]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                elif ch == '"':
+                    in_str = True
+                elif ch in "[{":
+                    depth += 1
+                elif ch in "]}":
+                    depth -= 1
+                    if depth == 0:
+                        j += 1
+                        break
+                j += 1
+            if j - i >= minlen:                  # short inline objects read fine, leave them
+                out.append("[json]")
+                i = j
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _condense_line_numbers(s, minrun=4):
+    """`cat -n`-style file reads — "1 import x 2 import y 3 …" — are pure noise once newlines
+    are gone. Collapse a run of ascending bare line numbers into a [file] placeholder. Bare
+    digits only, so a "1. do this 2. do that" prose list is left alone."""
+    toks = s.split(" ")
+    out, i, n = [], 0, len(toks)
+    while i < n:
+        if toks[i].isdigit():
+            last, chain = int(toks[i]), [i]
+            for k in range(i + 1, n):
+                if toks[k].isdigit():
+                    v = int(toks[k])
+                    if 0 < v - last <= 3:      # small gaps = blank lines in the file
+                        last, _ = v, chain.append(k)
+                    else:
+                        break
+            if len(chain) >= minrun:
+                out.append("[file]")
+                i = chain[-1] + 1
+                continue
+        out.append(toks[i])
+        i += 1
+    return " ".join(out)
+
+
+def clean_snippet(text):
+    """Turn one raw transcript message into readable prose for a result row.
+
+    Strips markdown noise (fences, headings, bullets, emphasis, link syntax) and condenses
+    payloads — JSON dumps, pasted images, long opaque tokens — into short placeholders, so a
+    snippet shows what was said rather than what was dumped. Search still runs over the raw
+    text; this is display only.
+    """
+    if not text:
+        return ""
+    t = _FENCE_RE.sub(" [code] ", text)
+    t = _OPEN_FENCE_RE.sub(" [code] ", t)
+    t = _IMAGE_RE.sub(" [image] ", t)
+    t = _condense_json(t)
+    t = _condense_line_numbers(t)
+    t = _MD_LINK_RE.sub(r"\1", t)
+    t = _MD_CODESPAN_RE.sub(r"\1", t)
+    t = _MD_LEAD_LIST_RE.sub("", t)
+    t = _MD_BULLET_RE.sub("", t)          # before emphasis: the bullet is spotted by the ** it leads
+    t = _MD_BOLD_RE.sub(r"\2", t)
+    t = _MD_ITALIC_RE.sub(r"\1", t)
+    t = _MD_HEADING_RE.sub("", t)
+    t = _LONG_TOKEN_RE.sub(lambda mo: mo.group(0)[:20] + "…", t)
+    return " ".join(t.split())
+
+
 def _snippet(text, terms, width=200):
-    """A window of text centered on the first matching term, highlighted."""
-    lo = text.lower()
-    pos = min([lo.find(t) for t in terms if t and t in lo] or [0])
+    """A readable window of text centered on the first matching term, highlighted.
+
+    Cleaned first, so the window shows prose instead of raw payload. If the match only exists
+    in the part that got condensed, fall back to the raw text — a snippet without the term you
+    searched for is worse than a noisy one.
+    """
+    live = [t for t in terms if t]
+    clean = clean_snippet(text)
+    if live and not any(t in clean.lower() for t in live):
+        clean = _single_line(text, len(text))
+    lo = clean.lower()
+    pos = min([lo.find(t) for t in live if t in lo] or [0])
     start = max(0, pos - 40)
-    frag = text[start:start + width]
+    frag = clean[start:start + width]
     if start:
         frag = "…" + frag
-    return _highlight(frag, terms)
+    if start + width < len(clean):
+        frag += "…"
+    return _highlight(frag, live)
 
 
 def render_preview(sid, thinking, query):
