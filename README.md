@@ -83,10 +83,13 @@ that spawned them** (linked via the subagent's `sessionId` field). A hit in suba
 and resumes the parent; the preview shows subagent lines tagged `⤷`. So the list stays at ~325
 real sessions while nothing is lost from search.
 
-Search is **BM25-lite ranked**, not just substring. It drops stopwords, applies a conservative
-stem so `migration`≈`migrate`≈`migrating`, and scores each session by `idf × (title-boost +
-saturated term-frequency)`: distinctive words and sessions that actually discuss a term at length
-rank above ones that mention it once. Badge `N/T` = query terms matched. A word that barely exists
+Search is **BM25 ranked**, not just substring. It drops stopwords, applies a conservative stem so
+`migration`≈`migrate`≈`migrating`, and scores each session over three weighted fields — title +
+project, the session's **first prompt**, and the full transcript. The first prompt is what you
+opened the session *asking for*, so it's weighted hardest; **length normalization** means a
+sprawling transcript that mentions your term once no longer outranks a short, on-point session.
+Near-ties are then nudged by **recency** and by how often you've actually resumed that session
+(read off agsearch's own resume log). Badge `N/T` = query terms matched. A word that barely exists
 anywhere (a typo like `alibrry`) falls back to subsequence matching. No modes or flags.
 
 Honest limit: this is lexical, not semantic. The top hit is reliably right, but because
@@ -119,3 +122,5 @@ press **⌘F → ⌘V → Enter** to jump to the match in whatever iTerm holds i
   sessions are re-parsed on later runs.
 - The JSONL schema is Claude Code's internal format and can change between releases; if a
   future version breaks parsing, run `agsearch --reindex` after updating the extractor.
+- Ranking is covered by tests over a small fixture corpus (no dependencies, no fixtures on
+  disk): `python3 -m unittest discover -s tests`.

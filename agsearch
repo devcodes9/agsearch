@@ -63,6 +63,23 @@ HEADER_LINES = 5
 # (an agent mid-turn, or a CLI you have open in another tab). Marked ● live in the list.
 ACTIVE_WINDOW_SEC = 180
 
+# sessions.tsv columns (written by build_sessions, read by cmd_filter).
+C_SID, C_CWD, C_DATE, C_SOURCE, C_KIND, C_TITLE, C_FIRST, C_BLOB = range(8)
+SESSION_COLS = 8
+
+# Ranking knobs — see rank_sessions(). k1/b are textbook BM25; b<1 keeps length normalization
+# firm but not brutal, since a long session that genuinely discusses a term should still win
+# over a short one that name-drops it. Fields are weighted: what you opened the session ASKING
+# for (first prompt) beats what got said somewhere in hour three.
+BM25_K1 = 1.2
+BM25_B = 0.65
+W_TITLE = 2.0
+W_FIRST = 2.5
+W_BODY = 1.0
+RECENCY_HALFLIFE_DAYS = 45.0
+RECENCY_W = 0.35          # max multiplier bump for a session from today
+USAGE_W = 0.30            # max multiplier bump for a session you resume often
+
 
 # ------------------------------------------------------------------ parsing
 
@@ -571,7 +588,9 @@ def group_sessions(lines):
 
 
 def build_sessions(lines):
-    """Write one line per session to SESSIONS_PATH (sid, cwd, date, source, kind, title, blob)."""
+    """Write one line per session to SESSIONS_PATH: sid, cwd, date, source, kind, title, first
+    prompt, blob. The first prompt is stored separately from the blob so ranking can weight it
+    as its own field — it's the strongest single signal of what a session is about."""
     try:
         index = json.load(open(INDEX_PATH))
     except (OSError, json.JSONDecodeError):
@@ -580,9 +599,11 @@ def build_sessions(lines):
     for s in group_sessions(lines):
         source = index.get(s["sid"], {}).get("source", "cc")
         title = _single_line(s["title"] or "(untitled)", 90)
+        first = _single_line(s["first_user"], 400)
         # High cap so full sessions (incl. folded-in subagent content) stay searchable.
         blob = _single_line(" · ".join(s["texts"]), 2_000_000)
-        out.append(SEP.join([s["sid"], s["cwd"], s["date"][:10], source, s["kind"], title, blob]))
+        out.append(SEP.join([s["sid"], s["cwd"], s["date"][:10], source, s["kind"],
+                             title, first, blob]))
     with open(SESSIONS_PATH, "w") as fh:
         fh.write("\n".join(out))
 
@@ -654,43 +675,98 @@ def _row(sid, cwd, date, source, kind, title, badge, active=False):
     return SEP.join([sid, cwd, body, "1" if active else "0"])
 
 
-def _smart_rows(rows, qterms, live=frozenset()):
-    """BM25-lite ranking. For each query term (matched by its conservative stem) a session
-    scores idf * (title_boost + saturated term-frequency), so distinctive words and sessions
-    that actually discuss the term at length win, instead of any session that mentions it once.
-    A term that exists nowhere as text (a typo like 'alibrry') falls back to subsequence match.
-    Badge = matched/total. Ranked by score, not raw coverage, so the top rows are truly relevant.
+def _bm25_tf(tf, dl, avgdl):
+    """BM25 saturated term frequency with length normalization: a term mentioned twice counts
+    for much less than twice once, and a hit in a huge transcript counts for less than the same
+    hit in a short, on-point one."""
+    if not tf:
+        return 0.0
+    return tf * (BM25_K1 + 1) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * dl / (avgdl or 1)))
+
+
+def _age_days(date_str, now=None):
+    try:
+        t = time.mktime(time.strptime(date_str[:10], "%Y-%m-%d"))
+    except (ValueError, OverflowError, TypeError):
+        return 3650.0                                # undated → treat as ancient, never boosted
+    return max(0.0, ((now if now is not None else time.time()) - t) / 86400.0)
+
+
+_RESUME_SID_RE = re.compile(r"(?:--resume|resume)\s+([0-9a-fA-F][0-9a-fA-F-]{7,})")
+
+
+def _usage_counts(path=None):
+    """How often each session was resumed, read back off the last-resume.log breadcrumb.
+    That log is the only record of which sessions you actually return to — the sessions you
+    keep reopening are the ones you most likely mean next time."""
+    counts = {}
+    try:
+        with open(path or os.path.join(CACHE_DIR, "last-resume.log"), errors="replace") as fh:
+            recent = fh.readlines()[-2000:]
+    except OSError:
+        return counts
+    for line in recent:
+        m = _RESUME_SID_RE.search(line)
+        if m:
+            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    return counts
+
+
+def _boost(f, usage, now):
+    """Multiplier for how likely this session is the one you want, independent of the query:
+    recent sessions and ones you resume often. Bounded, so it re-orders near-ties without ever
+    floating an irrelevant session above a real match."""
+    recency = 0.5 ** (_age_days(f[C_DATE], now) / RECENCY_HALFLIFE_DAYS)
+    used = usage.get(f[C_SID], 0)
+    return 1.0 + RECENCY_W * recency + USAGE_W * min(1.0, math.log1p(used) / math.log(6))
+
+
+def rank_sessions(rows, qterms, usage=None, now=None):
+    """Rank sessions for a query. Returns [(score, matched, row)] best-first.
+
+    BM25 over three weighted fields — title+project, first prompt, full conversation — with
+    length normalization, so a sprawling session no longer outranks a short exact match, and
+    what a session was *opened to do* outweighs a passing mention buried in it. The result is
+    then nudged by recency and how often you've resumed that session. A term that exists almost
+    nowhere as text (a typo like 'alibrry') falls back to subsequence matching.
     """
-    total = len(qterms)
+    usage = usage or {}
     n = len(rows) or 1
     keys = [stem if len(stem) >= 3 else term for term, stem in qterms]
 
-    # Pass 1: per-session term frequency + title hit, and document frequency per term.
+    # Pass 1: per-field term frequencies, plus document frequency per term for idf.
     data = []
     df = dict.fromkeys(keys, 0)
     for f in rows:
-        title_hay = (f[5] + " " + short_proj(f[1])).lower()
-        body_hay = f[6].lower()
+        title_hay = (f[C_TITLE] + " " + short_proj(f[C_CWD])).lower()
+        first_hay = f[C_FIRST].lower()
+        body_hay = f[C_BLOB].lower()
         rec = []
         for key in keys:
             tf = body_hay.count(key)
+            tf_first = first_hay.count(key)
             it = key in title_hay
-            if tf or it:
+            if tf or tf_first or it:
                 df[key] += 1
-            rec.append((tf, it))
-        data.append((f, title_hay, body_hay, rec))
+            rec.append((tf, tf_first, it))
+        data.append((f, title_hay, first_hay, body_hay, rec))
 
-    idf = {k: math.log(1 + n / (1 + df[k])) for k in df}
+    avg_body = sum(len(d[3]) for d in data) / len(data) if data else 1
+    avg_first = sum(len(d[2]) for d in data) / len(data) if data else 1
+    # Standard BM25 idf, shifted to stay positive even for terms in most documents.
+    idf = {k: math.log(1 + (n - df[k] + 0.5) / (df[k] + 0.5)) for k in df}
     typo = {k for k in df if df[k] <= 2}            # word barely exists → probably a typo, fuzzy it
 
     scored = []
-    for f, title_hay, body_hay, rec in data:
+    for f, title_hay, first_hay, body_hay, rec in data:
         score = 0.0
         matched = 0
-        for (term, _stem_unused), key, (tf, it) in zip(qterms, keys, rec):
-            if tf or it:
+        for (term, _stem_unused), key, (tf, tf_first, it) in zip(qterms, keys, rec):
+            if tf or tf_first or it:
                 matched += 1
-                score += idf[key] * (1.5 * it + 2.0 * tf / (tf + 1.5))
+                score += idf[key] * (W_TITLE * it
+                                     + W_FIRST * _bm25_tf(tf_first, len(first_hay), avg_first)
+                                     + W_BODY * _bm25_tf(tf, len(body_hay), avg_body))
             elif key in typo:
                 if _fuzzy_span(title_hay, term) is not None:
                     matched += 1
@@ -701,13 +777,26 @@ def _smart_rows(rows, qterms, live=frozenset()):
                         matched += 1
                         score += 0.3
         if matched:
-            scored.append((score, matched, f))
+            scored.append((score * _boost(f, usage, now), matched, f))
     # Categorise first: your own sessions always outrank plugin/SDK-spawned runs. Then
     # coverage (matched all your words), then relevance. Automation is demoted, never hidden.
-    scored.sort(key=lambda x: (x[2][4] == "auto", -x[1], -x[0]))
-    return [_row(f[0], f[1], f[2], f[3], f[4], f[5], f"\033[33m{m}/{total}\033[0m",
-                 f[0] in live)
-            for _score, m, f in scored[:200]]
+    scored.sort(key=lambda x: (x[2][C_KIND] == "auto", -x[1], -x[0]))
+    return scored
+
+
+def _smart_rows(rows, qterms, live=frozenset(), usage=None):
+    """Render the ranked sessions as fzf rows. Badge = matched/total query terms."""
+    total = len(qterms)
+    return [_row(f[C_SID], f[C_CWD], f[C_DATE], f[C_SOURCE], f[C_KIND], f[C_TITLE],
+                 f"\033[33m{m}/{total}\033[0m", f[C_SID] in live)
+            for _score, m, f in rank_sessions(rows, qterms, usage)[:200]]
+
+
+def parse_query(query):
+    """Query string → [(word, stem)]: stopwords dropped, words conservatively stemmed."""
+    words = re.findall(r"[a-z0-9]+", query.lower())
+    qwords = [w for w in words if w not in _STOP] or words   # keep stopwords if that's all
+    return [(w, _stem(w)) for w in qwords]
 
 
 def cmd_filter(argv):
@@ -715,24 +804,23 @@ def cmd_filter(argv):
 
     Search happens here (fzf runs --disabled), so the list shows only `date · project · N/T ·
     title` while full conversation text is searched. Smart ranking: stopwords dropped, words
-    stemmed (migration≈migrate), matched per-concept (exact→stem→typo), ranked by coverage.
+    stemmed (migration≈migrate), matched per-concept (exact→stem→typo), scored by weighted
+    BM25 over title / first prompt / transcript, then nudged by recency and resume count.
     """
-    query = " ".join(argv[1:]) if argv else ""
-    words = re.findall(r"[a-z0-9]+", query.lower())
-    qwords = [w for w in words if w not in _STOP] or words   # keep stopwords if that's all
-    qterms = [(w, _stem(w)) for w in qwords]
+    qterms = parse_query(" ".join(argv[1:]) if argv else "")
     try:
         raw = open(SESSIONS_PATH, errors="replace").read().splitlines()
     except OSError:
         return
-    rows = [line.split(SEP) for line in raw if line.count(SEP) >= 6]
+    rows = [line.split(SEP) for line in raw if line.count(SEP) >= SESSION_COLS - 1]
 
-    live = _active_sids([f[0] for f in rows])
+    live = _active_sids([f[C_SID] for f in rows])
     if not qterms:                                  # initial list: yours first, then automation
-        rows = sorted(rows, key=lambda f: f[4] == "auto")
-        out = [_row(f[0], f[1], f[2], f[3], f[4], f[5], "    ", f[0] in live) for f in rows]
+        rows = sorted(rows, key=lambda f: f[C_KIND] == "auto")
+        out = [_row(f[C_SID], f[C_CWD], f[C_DATE], f[C_SOURCE], f[C_KIND], f[C_TITLE], "    ",
+                    f[C_SID] in live) for f in rows]
     else:
-        out = _smart_rows(rows, qterms, live)
+        out = _smart_rows(rows, qterms, live, _usage_counts())
     sys.stdout.write("\n".join(out))
 
 
