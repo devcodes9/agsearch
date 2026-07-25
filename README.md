@@ -96,6 +96,11 @@ work in either mode: `'word` force-exact, `^prefix`, `suffix$`, `!exclude`, `a |
 **Enter** resumes the session (cd's to its project dir, runs `claude --resume`), **Ctrl-/** toggles
 the preview. Add `--no-resume` to print the resume command instead.
 
+Resume is **id-based**, so a session whose project dir has since been deleted (a removed worktree)
+still resumes — agsearch cd's to the nearest surviving ancestor of the dead path (or `$HOME`) and
+prints a one-line notice. Sessions written to in the last few minutes are probably still running:
+they're marked **●** in the list, and Enter warns (and asks, when there's a tty) before attaching.
+
 Because Claude Code renders its own TUI, an outside tool can't highlight a line *inside* the
 resumed session. So the highlighted-in-context view lives in the preview pane (before you spend
 any tokens), and as a bonus, Enter copies your query to the clipboard: once the session reopens,
