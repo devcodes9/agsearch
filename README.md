@@ -37,9 +37,24 @@ works without fzf.
 
 ### Optional: global hotkey
 
-Bind it to a system-wide shortcut so search is always one keypress away. With
-[Hammerspoon](https://www.hammerspoon.org), this pops a floating terminal that *becomes* your
-resumed session on Enter:
+Bind it to a system-wide shortcut so search is always one keypress away. Terminal behavior
+(same tab / new tab / new window) is controlled by your launcher config, not by `agsearch`.
+
+Recommended (iTerm + Hammerspoon): open in a **new tab** in the current window:
+
+```lua
+hs.hotkey.bind({ "ctrl", "cmd" }, "k", function()
+  hs.osascript.applescript([[
+    tell application "iTerm"
+      activate
+      tell current window
+        create tab with default profile command "/bin/zsh -lic \"exec agsearch\""
+      end tell
+    end tell]])
+end)
+```
+
+If you prefer a separate **new window** each time:
 
 ```lua
 hs.hotkey.bind({ "ctrl", "cmd" }, "k", function()

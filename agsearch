@@ -637,27 +637,36 @@ def _confirm_active(sid, bin_):
     return ok
 
 
+def _session_source(sid):
+    """Source recorded for this session id: `cc` (Claude) or `codex`."""
+    try:
+        return json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
+    except (OSError, json.JSONDecodeError):
+        return "cc"
+
+
+def _resume_invocation(sid, cwd):
+    """Return (source, bin, argv, target_dir, cwd_exists, note_cmd)."""
+    source = _session_source(sid)
+    bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
+        else ("claude", ["claude", "--resume", sid])
+    cwd_exists = bool(cwd) and os.path.isdir(cwd)
+    # Resume is id-based, so dead worktrees relocate to the nearest surviving ancestor.
+    target = cwd if cwd_exists else (_nearest_existing_dir(cwd) if cwd else "")
+    note = f"{'cd ' + (target or cwd) + ' && ' if (target or cwd) else ''}{' '.join(argv)}"
+    return source, bin_, argv, target, cwd_exists, note
+
+
 def resume(sid, cwd, query="", active=False):
     if query:
         try:                                        # stash query so ⌘F finds it in-session
             subprocess.run(["pbcopy"], input=query, text=True, check=False)
         except OSError:
             pass
-    try:
-        source = json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
-    except (OSError, json.JSONDecodeError):
-        source = "cc"
-    bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
-        else ("claude", ["claude", "--resume", sid])
-
-    # The recorded worktree may be long gone. Resume is id-based, so relocate to the nearest
-    # surviving ancestor (or $HOME) instead of refusing to launch.
-    cwd_exists = bool(cwd) and os.path.isdir(cwd)
-    target = cwd if cwd_exists else (_nearest_existing_dir(cwd) if cwd else "")
+    source, bin_, argv, target, cwd_exists, note = _resume_invocation(sid, cwd)
 
     # Leave a trace: if the launched CLI dies instantly the popup window vanishes with it,
     # so this log is the only way to see what was attempted.
-    note = f"cd {target or cwd} && {' '.join(argv)}"
     try:
         with open(os.path.join(CACHE_DIR, "last-resume.log"), "a") as fh:
             fh.write(f"{note}   [source={source} cwd_exists={cwd_exists}"
@@ -998,7 +1007,8 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     f = (sel.split(SEP) + [""] * 4)[:4]
     sid, cwd, active = f[0], f[1], f[3] == "1"
     if no_resume:
-        print(f"cd {cwd} && claude --resume {sid}")
+        _source, _bin, _argv, _target, _cwd_exists, note = _resume_invocation(sid, cwd)
+        print(note)
         return 0
     resume(sid, cwd, typed, active=active)
     return 0
