@@ -900,6 +900,12 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     for f, title_hay, first_hay, body_hay, rec in data:
         score = 0.0
         matched = 0
+        exact_line_hits = 0
+        if qterms:
+            exact_line_hits = sum(
+                1 for seg in body_hay.split(" · ")
+                if all(term in seg for term, _ in qterms)
+            )
         for (term, _stem_unused), key, (tf, tf_first, it) in zip(qterms, keys, rec):
             if tf or tf_first or it:
                 matched += 1
@@ -916,11 +922,12 @@ def rank_sessions(rows, qterms, usage=None, now=None):
                         matched += 1
                         score += 0.3
         if matched:
-            scored.append((score * _boost(f, usage, now), matched, f))
+            scored.append((score * _boost(f, usage, now), matched, exact_line_hits, f))
     # Categorise first: your own sessions always outrank plugin/SDK-spawned runs. Then
-    # coverage (matched all your words), then relevance. Automation is demoted, never hidden.
-    scored.sort(key=lambda x: (x[2][C_KIND] == "auto", -x[1], -x[0]))
-    return scored
+    # coverage (matched all your words), then exact line-level hits (preview's "match(es)"),
+    # then relevance. Automation is demoted, never hidden.
+    scored.sort(key=lambda x: (x[3][C_KIND] == "auto", -x[1], -x[2], -x[0]))
+    return [(s, m, f) for s, m, _h, f in scored]
 
 
 def _smart_rows(rows, qterms, live=frozenset(), usage=None, gone=frozenset()):
