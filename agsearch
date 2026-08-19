@@ -659,7 +659,8 @@ def _copy_query_to_clipboard(query, which=shutil.which, run=subprocess.run):
 def _session_source(sid):
     """Source recorded for this session id: `cc` (Claude) or `codex`."""
     try:
-        return json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
+        with open(INDEX_PATH) as fh:
+            return json.load(fh).get(sid, {}).get("source", "cc")
     except (OSError, json.JSONDecodeError):
         return "cc"
 
