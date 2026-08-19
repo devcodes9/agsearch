@@ -333,7 +333,7 @@ def apply_scope(lines, here=False, project=None):
 
 def rank_matches(lines, query):
     """AND-of-terms substring filter, ranked by recency (iso date desc)."""
-    terms = [t.lower() for t in query.split()]
+    terms = preview_match_terms(query)
     hits = [l for l in lines if all(t in l.lower() for t in terms)]
     hits.sort(key=lambda l: l.split(SEP)[3], reverse=True)
     return hits
@@ -373,7 +373,7 @@ def print_matches(lines, query, limit=40):
     if not hits:
         print("No matches.", file=sys.stderr)
         return 1
-    terms = [t.lower() for t in query.split()]
+    terms = preview_match_terms(query)
     for l in hits[:limit]:
         print(fmt_row(l, terms))
     extra = len(hits) - limit
@@ -563,7 +563,7 @@ def render_preview(sid, thinking, query):
     tagged.sort(key=lambda x: x[0][3])   # chronological by timestamp
     rows = [r for r, _ in tagged]
 
-    terms = [t.lower() for t in query.split()]
+    terms = preview_match_terms(query)
     r0 = rows[0]
     n_sub = sum(1 for _, sub in tagged if sub)
     disp_title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
@@ -573,6 +573,9 @@ def render_preview(sid, thinking, query):
           + (f" · {n_sub} subagent" if n_sub else "") + gone + "\033[0m")
 
     if terms:
+        qmap = concept_mappings(query, " · ".join(r[7] for r in rows))
+        if qmap:
+            print(f"\033[2mquery map: {', '.join(qmap[:6])}\033[0m")
         # Only the matched lines with a bit of context — not the whole transcript.
         matches = [(r, sub) for r, sub in tagged if all(t in r[7].lower() for t in terms)]
         print(f"\n\033[1;33m● {len(matches)} match(es)\033[0m")
@@ -756,6 +759,11 @@ def _stem(w):
     return w
 
 
+def _match_keys(qterms):
+    """Term keys used by ranking/preview: short words exact, longer words stemmed."""
+    return [stem if len(stem) >= 3 else term for term, stem in qterms]
+
+
 def _fuzzy_span(hay, term):
     """Greedy first subsequence match; returns its character span, or None (last-resort typo tier)."""
     i = start = 0
@@ -767,6 +775,43 @@ def _fuzzy_span(hay, term):
             if i == len(term):
                 return ci - start + 1
     return None
+
+
+def _best_fuzzy_match_word(hay, term):
+    """Best typo-like candidate word in `hay` for `term`, else None."""
+    best = None
+    for w in set(re.findall(r"[a-z0-9]{3,}", hay)):
+        sp = _fuzzy_span(w, term)
+        if sp is None or sp > len(term) * 3:
+            continue
+        cand = (sp, abs(len(w) - len(term)), w)
+        if best is None or cand < best:
+            best = cand
+    return best[2] if best else None
+
+
+def preview_match_terms(query):
+    """Preview/list filters use the same normalized term keys as ranking."""
+    return _match_keys(parse_query(query))
+
+
+def concept_mappings(query, hay):
+    """Human-readable query→matched mapping for one session body."""
+    qterms = parse_query(query)
+    keys = _match_keys(qterms)
+    body = hay.lower()
+    out = []
+    seen = set()
+    for (term, _stem_unused), key in zip(qterms, keys):
+        if key in body:
+            mapped = key
+        else:
+            mapped = _best_fuzzy_match_word(body, term) or key
+        item = f"{term}→{mapped}" if mapped != term else term
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
 
 
 _SRC_MARK = {"cc": "\033[34mcc  \033[0m", "codex": "\033[35mcx  \033[0m"}
@@ -880,7 +925,7 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     """
     usage = usage or {}
     n = len(rows) or 1
-    keys = [stem if len(stem) >= 3 else term for term, stem in qterms]
+    keys = _match_keys(qterms)
 
     # Pass 1: per-field term frequencies, plus document frequency per term for idf.
     data = []
