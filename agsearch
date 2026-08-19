@@ -562,7 +562,7 @@ def render_preview(sid, thinking, query):
     tagged.sort(key=lambda x: x[0][3])   # chronological by timestamp
     rows = [r for r, _ in tagged]
 
-    terms = [t.lower() for t in query.split()]
+    terms = preview_match_terms(query)
     r0 = rows[0]
     n_sub = sum(1 for _, sub in tagged if sub)
     disp_title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
