@@ -85,6 +85,38 @@ class RankingPreviewAlignmentTests(unittest.TestCase):
         self.assertGreater(ag._count_line_matches(rows[0][ag.C_BLOB].lower(), preview_terms), 0)
         self.assertGreater(ag._count_line_matches(rows[1][ag.C_BLOB].lower(), preview_terms), 0)
 
+    def test_exact_line_strength_is_bounded_before_bm25(self):
+        ag = _load_agsearch()
+        rows = [
+            [
+                "s_many_lines",
+                "/repo/a",
+                "2026-08-19",
+                "cc",
+                "cli",
+                "notes",
+                "",
+                "eu legislation one · eu legislation two · eu legislation three · "
+                "eu legislation four · eu legislation five · eu legislation six",
+            ],
+            [
+                "s_focused",
+                "/repo/b",
+                "2026-08-19",
+                "cc",
+                "cli",
+                "EU legislation rollout plan",
+                "eu legislation migration strategy and policy checklist",
+                "eu legislation checklist · eu legislation rollout · eu legislation policy",
+            ],
+        ]
+
+        qterms = ag.parse_query("EU legislation")
+        ranked = ag.rank_sessions(rows, qterms, usage={}, now=0)
+
+        # A stronger title/first-prompt BM25 signal should win once line-hit count is capped.
+        self.assertEqual(ranked[0][2][ag.C_SID], "s_focused")
+
 
 if __name__ == "__main__":
     unittest.main()
