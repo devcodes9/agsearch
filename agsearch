@@ -47,6 +47,7 @@ META_PATH = os.path.join(CACHE_DIR, "meta.json")
 SESSIONS_PATH = os.path.join(CACHE_DIR, "sessions.tsv")   # one line per session, for _filter
 SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subagent file paths]
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
+SEARCH_LOG_PATH = os.path.join(CACHE_DIR, "search.log")   # one json event per search interaction
 
 CACHE_FMT = 4   # bump when the TSV column layout / keying changes, to invalidate old fragments
 
@@ -331,9 +332,42 @@ def apply_scope(lines, here=False, project=None):
     return lines
 
 
+def _append_search_event(event, path=SEARCH_LOG_PATH):
+    """Best-effort local telemetry (JSONL): never interfere with search UX."""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def _record_search_event(mode, query, result_count, selected_sid=None, selected_rank=None,
+                         latency_ms=None, path=SEARCH_LOG_PATH):
+    event = {
+        "ts": int(time.time()),
+        "mode": mode,
+        "query": query or "",
+        "match_terms": match_terms(query),
+        "result_count": int(result_count),
+    }
+    if selected_sid:
+        event["selected_sid"] = selected_sid
+    if selected_rank is not None:
+        event["selected_rank"] = int(selected_rank)
+    if latency_ms is not None:
+        event["latency_ms"] = int(latency_ms)
+    _append_search_event(event, path=path)
+
+
+def match_terms(query):
+    """Normalized matching terms used for filtering/ranking behavior."""
+    return _match_keys(parse_query(query))
+
+
 def rank_matches(lines, query):
     """AND-of-terms substring filter, ranked by recency (iso date desc)."""
-    terms = [t.lower() for t in query.split()]
+    terms = match_terms(query)
     hits = [l for l in lines if all(t in l.lower() for t in terms)]
     hits.sort(key=lambda l: l.split(SEP)[3], reverse=True)
     return hits
@@ -371,15 +405,40 @@ def fmt_row(l, terms=()):
 def print_matches(lines, query, limit=40):
     hits = rank_matches(lines, query) if query else lines
     if not hits:
-        print("No matches.", file=sys.stderr)
+        for msg in _no_match_guidance(lines, query):
+            print(msg, file=sys.stderr)
         return 1
-    terms = [t.lower() for t in query.split()]
+    terms = match_terms(query)
     for l in hits[:limit]:
         print(fmt_row(l, terms))
     extra = len(hits) - limit
     if extra > 0:
         print(f"... and {extra} more (narrow the query or use the fzf TUI).", file=sys.stderr)
     return 0
+
+
+def _no_match_guidance(lines, query, max_fallback=5):
+    """Recovery paths for no-results states: never leave users at a dead end."""
+    out = []
+    q = (query or "").strip()
+    if q:
+        out.append(f'No matches for "{q}".')
+    else:
+        out.append("No matches.")
+    terms = match_terms(q)
+    if terms:
+        out.append("concept terms: " + ", ".join(terms))
+    if q:
+        out.append(f"try fuzzy: agsearch --fuzzy {shlex.quote(q)}")
+        words = q.split()
+        if len(words) > 1:
+            out.append("try broader: agsearch " + shlex.quote(" ".join(words[:-1])))
+    sessions = group_sessions(lines)[:max_fallback]
+    if sessions:
+        out.append("recent sessions:")
+        for s in sessions:
+            out.append(f"  {s['date'][:10]}  {short_proj(s['cwd'])[:18]:<18}  {s['title'][:62]}")
+    return out
 
 
 def _session_path(sid):
@@ -747,6 +806,11 @@ def _stem(w):
     return w
 
 
+def _match_keys(qterms):
+    """Term keys used for matching/scoring: short words exact, longer words stemmed."""
+    return [stem if len(stem) >= 3 else term for term, stem in qterms]
+
+
 def _fuzzy_span(hay, term):
     """Greedy first subsequence match; returns its character span, or None (last-resort typo tier)."""
     i = start = 0
@@ -871,7 +935,7 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     """
     usage = usage or {}
     n = len(rows) or 1
-    keys = [stem if len(stem) >= 3 else term for term, stem in qterms]
+    keys = _match_keys(qterms)
 
     # Pass 1: per-field term frequencies, plus document frequency per term for idf.
     data = []
@@ -938,6 +1002,31 @@ def parse_query(query):
     return [(w, _stem(w)) for w in qwords]
 
 
+def _load_session_rows():
+    try:
+        raw = open(SESSIONS_PATH, errors="replace").read().splitlines()
+    except OSError:
+        return []
+    return [line.split(SEP) for line in raw if line.count(SEP) >= SESSION_COLS - 1]
+
+
+def _ranked_session_rows(rows, query):
+    qterms = parse_query(query or "")
+    if not qterms:
+        return sorted(rows, key=lambda f: f[C_KIND] == "auto")
+    return [f for _score, _matched, f in rank_sessions(rows, qterms, _usage_counts())]
+
+
+def _result_count_and_rank(rows, query, sid):
+    ranked = _ranked_session_rows(rows, query)
+    if not sid:
+        return len(ranked), None
+    for i, f in enumerate(ranked, 1):
+        if f[C_SID] == sid:
+            return len(ranked), i
+    return len(ranked), None
+
+
 def cmd_filter(argv):
     """fzf reload target: print CLEAN session rows ranked for the live query.
 
@@ -968,7 +1057,11 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     if not shutil.which("fzf"):
         print("fzf not installed. Falling back to non-interactive output.\n"
               "Install with: brew install fzf\n", file=sys.stderr)
-        return print_matches(lines, query)
+        t0 = time.time()
+        rc = print_matches(lines, query)
+        total = len(rank_matches(lines, query) if query else lines)
+        _record_search_event("no-fzf-fallback", query, total, latency_ms=(time.time() - t0) * 1000)
+        return rc
 
     self = os.path.abspath(__file__)
     build_sessions(lines)                # refresh the per-session cache _filter reads
@@ -989,14 +1082,23 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     ]
     if query:
         args += ["--query", query]
+    t0 = time.time()
     proc = subprocess.run(args, input="", text=True, capture_output=True)
+    latency_ms = (time.time() - t0) * 1000
     out = proc.stdout.split("\n")
     typed = out[0] if out else query     # --print-query puts the final query on line 1
     sel = next((l for l in out[1:] if l.strip()), "")
+    sid = cwd = ""
+    active = False
+    if sel:
+        f = (sel.split(SEP) + [""] * 4)[:4]
+        sid, cwd, active = f[0], f[1], f[3] == "1"
+    rows = _load_session_rows()
+    total, sel_rank = _result_count_and_rank(rows, typed, sid)
+    _record_search_event("fzf", typed, total, selected_sid=sid or None,
+                         selected_rank=sel_rank, latency_ms=latency_ms)
     if not sel:
         return 0
-    f = (sel.split(SEP) + [""] * 4)[:4]
-    sid, cwd, active = f[0], f[1], f[3] == "1"
     if no_resume:
         print(f"cd {cwd} && claude --resume {sid}")
         return 0
@@ -1053,7 +1155,11 @@ def main(argv):
         return 1
 
     if no_fzf:
-        return print_matches(lines, query)
+        t0 = time.time()
+        rc = print_matches(lines, query)
+        total = len(rank_matches(lines, query) if query else lines)
+        _record_search_event("no-fzf", query, total, latency_ms=(time.time() - t0) * 1000)
+        return rc
     return run_fzf(lines, query, thinking=thinking, no_resume=no_resume, fuzzy=fuzzy)
 
 
