@@ -15,6 +15,7 @@ Usage:
     agsearch --project myapp       # only sessions whose path matches 'myapp'
     agsearch --thinking            # also index assistant thinking blocks
     agsearch --reindex             # force a full rebuild of the cache
+    agsearch --quality-report      # summarize local search quality telemetry
     agsearch _preview <sid> <seq> <thinking> <query...>   # (internal) fzf preview
 
 In the TUI the right pane previews the matched session, auto-scrolled to your match
@@ -37,6 +38,7 @@ import time
 import shutil
 import hashlib
 import subprocess
+from collections import Counter
 
 HOME = os.path.expanduser("~")
 PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
@@ -47,6 +49,7 @@ META_PATH = os.path.join(CACHE_DIR, "meta.json")
 SESSIONS_PATH = os.path.join(CACHE_DIR, "sessions.tsv")   # one line per session, for _filter
 SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subagent file paths]
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
+SEARCH_LOG_PATH = os.path.join(CACHE_DIR, "search.log")   # jsonl telemetry events
 
 CACHE_FMT = 4   # bump when the TSV column layout / keying changes, to invalidate old fragments
 
@@ -851,6 +854,102 @@ def _usage_counts(path=None):
     return counts
 
 
+def _load_search_events(path=SEARCH_LOG_PATH, max_events=5000):
+    """Load recent local telemetry events from jsonl (best effort)."""
+    try:
+        with open(path, errors="replace") as fh:
+            lines = fh.read().splitlines()[-max_events:]
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out
+
+
+def _quality_stats(events):
+    """Aggregate useful search quality counters from telemetry events."""
+    total = len(events)
+    zero = 0
+    selected = 0
+    latencies = []
+    ranks = []
+    query_counts = Counter()
+    zero_query_counts = Counter()
+    for ev in events:
+        q = str(ev.get("query", "")).strip()
+        if q:
+            query_counts[q] += 1
+        rc = ev.get("result_count")
+        try:
+            rc_i = int(rc)
+        except (TypeError, ValueError):
+            rc_i = None
+        if rc_i == 0:
+            zero += 1
+            if q:
+                zero_query_counts[q] += 1
+        sid = ev.get("selected_sid")
+        if isinstance(sid, str) and sid:
+            selected += 1
+        lat = ev.get("latency_ms")
+        if isinstance(lat, (int, float)):
+            latencies.append(float(lat))
+        rk = ev.get("selected_rank")
+        if isinstance(rk, (int, float)):
+            ranks.append(float(rk))
+    return {
+        "total": total,
+        "zero": zero,
+        "selected": selected,
+        "latencies": latencies,
+        "ranks": ranks,
+        "top_queries": query_counts.most_common(5),
+        "top_zero_queries": zero_query_counts.most_common(5),
+    }
+
+
+def _pct(n, d):
+    return (100.0 * n / d) if d else 0.0
+
+
+def cmd_quality_report(path=SEARCH_LOG_PATH, out=sys.stdout):
+    """Print a compact local search quality report from telemetry log."""
+    events = _load_search_events(path=path)
+    print("agsearch quality report (local telemetry)", file=out)
+    print(f"log: {path}", file=out)
+    if not events:
+        print("no telemetry events found yet. run agsearch searches first.", file=out)
+        return 0
+    s = _quality_stats(events)
+    print(f"events: {s['total']}", file=out)
+    print(f"zero-result rate: {s['zero']}/{s['total']} ({_pct(s['zero'], s['total']):.1f}%)", file=out)
+    print(f"selection rate: {s['selected']}/{s['total']} ({_pct(s['selected'], s['total']):.1f}%)", file=out)
+    if s["ranks"]:
+        avg_rank = sum(s["ranks"]) / len(s["ranks"])
+        print(f"avg selected rank: {avg_rank:.2f} (n={len(s['ranks'])})", file=out)
+    if s["latencies"]:
+        ls = sorted(s["latencies"])
+        p95_i = max(0, min(len(ls) - 1, int(math.ceil(0.95 * len(ls))) - 1))
+        print(f"latency avg/p95 ms: {sum(ls)/len(ls):.1f}/{ls[p95_i]:.1f}", file=out)
+    if s["top_zero_queries"]:
+        print("top zero-result queries:", file=out)
+        for q, c in s["top_zero_queries"]:
+            print(f"  {c:>4}  {q}", file=out)
+    if s["top_queries"]:
+        print("top queries:", file=out)
+        for q, c in s["top_queries"]:
+            print(f"  {c:>4}  {q}", file=out)
+    return 0
+
+
 def _boost(f, usage, now):
     """Multiplier for how likely this session is the one you want, independent of the query:
     recent sessions and ones you resume often. Bounded, so it re-orders near-ties without ever
@@ -1017,7 +1116,7 @@ def main(argv):
         cmd_filter(argv[1:])
         return 0
 
-    no_fzf = no_resume = here = thinking = reindex = fuzzy = False
+    no_fzf = no_resume = here = thinking = reindex = fuzzy = quality_report = False
     project = None
     query_parts = []
     i = 0
@@ -1035,6 +1134,8 @@ def main(argv):
             fuzzy = True
         elif a == "--reindex":
             reindex = True
+        elif a == "--quality-report":
+            quality_report = True
         elif a in ("-p", "--project"):
             i += 1
             project = argv[i] if i < len(argv) else None
@@ -1044,6 +1145,9 @@ def main(argv):
         else:
             query_parts.append(a)
         i += 1
+
+    if quality_report:
+        return cmd_quality_report()
 
     query = " ".join(query_parts)
     lines = build_index(include_thinking=thinking, force=reindex)
