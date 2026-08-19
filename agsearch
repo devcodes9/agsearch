@@ -80,7 +80,6 @@ RECENCY_HALFLIFE_DAYS = 45.0
 RECENCY_W = 0.35          # max multiplier bump for a session from today
 USAGE_W = 0.30            # max multiplier bump for a session you resume often
 
-
 # ------------------------------------------------------------------ parsing
 
 def _flatten_content(content):
@@ -333,7 +332,7 @@ def apply_scope(lines, here=False, project=None):
 
 def rank_matches(lines, query):
     """AND-of-terms substring filter, ranked by recency (iso date desc)."""
-    terms = [t.lower() for t in query.split()]
+    terms = preview_match_terms(query)
     hits = [l for l in lines if all(t in l.lower() for t in terms)]
     hits.sort(key=lambda l: l.split(SEP)[3], reverse=True)
     return hits
@@ -747,6 +746,18 @@ def _stem(w):
     return w
 
 
+def _match_keys(qterms):
+    """Ranking/preview term keys: exact term for short words, stem for longer inflections."""
+    return [stem if len(stem) >= 3 else term for term, stem in qterms]
+
+
+def _count_line_matches(text, terms):
+    """How many ` · `-joined segments contain all terms."""
+    if not terms:
+        return 0
+    return sum(1 for seg in text.split(" · ") if all(t in seg for t in terms))
+
+
 def _fuzzy_span(hay, term):
     """Greedy first subsequence match; returns its character span, or None (last-resort typo tier)."""
     i = start = 0
@@ -871,7 +882,7 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     """
     usage = usage or {}
     n = len(rows) or 1
-    keys = [stem if len(stem) >= 3 else term for term, stem in qterms]
+    keys = _match_keys(qterms)
 
     # Pass 1: per-field term frequencies, plus document frequency per term for idf.
     data = []
@@ -900,12 +911,7 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     for f, title_hay, first_hay, body_hay, rec in data:
         score = 0.0
         matched = 0
-        exact_line_hits = 0
-        if qterms:
-            exact_line_hits = sum(
-                1 for seg in body_hay.split(" · ")
-                if all(term in seg for term, _ in qterms)
-            )
+        exact_line_hits = _count_line_matches(body_hay, keys) if qterms else 0
         for (term, _stem_unused), key, (tf, tf_first, it) in zip(qterms, keys, rec):
             if tf or tf_first or it:
                 matched += 1
@@ -943,6 +949,11 @@ def parse_query(query):
     words = re.findall(r"[a-z0-9]+", query.lower())
     qwords = [w for w in words if w not in _STOP] or words   # keep stopwords if that's all
     return [(w, _stem(w)) for w in qwords]
+
+
+def preview_match_terms(query):
+    """Preview uses the same normalized term keys as ranking."""
+    return _match_keys(parse_query(query))
 
 
 def cmd_filter(argv):

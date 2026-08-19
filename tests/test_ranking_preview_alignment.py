@@ -46,6 +46,45 @@ class RankingPreviewAlignmentTests(unittest.TestCase):
         self.assertEqual(ranked[0][2][ag.C_SID], "s2")
         self.assertEqual(ranked[0][1], 2)
 
+    def test_preview_uses_same_normalized_terms_as_ranking(self):
+        ag = _load_agsearch()
+        rows = [
+            [
+                "s_top",
+                "/repo/a",
+                "2026-08-19",
+                "cc",
+                "cli",
+                "Migration mega thread",
+                "migration plan",
+                "migration checklist · migration steps · migration details · migration rollback",
+            ],
+            [
+                "s_lower",
+                "/repo/b",
+                "2026-08-18",
+                "cc",
+                "cli",
+                "notes",
+                "",
+                "how migration works · how migration rollback · migration pitfalls",
+            ],
+        ]
+
+        query = "how migration"
+        qterms = ag.parse_query(query)
+        ranked = ag.rank_sessions(rows, qterms, usage={}, now=0)
+        self.assertEqual(ranked[0][2][ag.C_SID], "s_top")
+
+        # Regression proof: raw split terms would show 0 top preview hits ("how" is a stopword).
+        self.assertEqual(ag._count_line_matches(rows[0][ag.C_BLOB].lower(), query.lower().split()), 0)
+
+        # Fixed behavior: preview and ranking use the same normalized terms.
+        preview_terms = ag.preview_match_terms(query)
+        self.assertEqual(preview_terms, ag._match_keys(qterms))
+        self.assertGreater(ag._count_line_matches(rows[0][ag.C_BLOB].lower(), preview_terms), 0)
+        self.assertGreater(ag._count_line_matches(rows[1][ag.C_BLOB].lower(), preview_terms), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
