@@ -63,6 +63,27 @@ class QualityReportTests(unittest.TestCase):
         self.assertIn("top zero-result queries:", txt)
         self.assertIn("alpha", txt)
 
+    def test_cmd_quality_report_json_renders_machine_readable_payload(self):
+        ag = _load_agsearch()
+        with tempfile.NamedTemporaryFile(mode="w+", delete=True) as fh:
+            fh.write(json.dumps({"query": "alpha", "result_count": 0, "latency_ms": 11}) + "\n")
+            fh.write(json.dumps({"query": "alpha", "result_count": 2, "selected_sid": "s1",
+                                 "selected_rank": 2, "latency_ms": 15}) + "\n")
+            fh.flush()
+            out = io.StringIO()
+            rc = ag.cmd_quality_report_json(path=fh.name, out=out)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["events"], 2)
+        self.assertEqual(payload["zero_result_count"], 1)
+        self.assertAlmostEqual(payload["zero_result_rate"], 0.5)
+        self.assertEqual(payload["selection_count"], 1)
+        self.assertAlmostEqual(payload["selection_rate"], 0.5)
+        self.assertAlmostEqual(payload["avg_selected_rank"], 2.0)
+        self.assertAlmostEqual(payload["latency_avg_ms"], 13.0)
+        self.assertAlmostEqual(payload["latency_p95_ms"], 15.0)
+        self.assertEqual(payload["top_zero_queries"][0]["query"], "alpha")
+
 
 if __name__ == "__main__":
     unittest.main()

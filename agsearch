@@ -16,6 +16,7 @@ Usage:
     agsearch --thinking            # also index assistant thinking blocks
     agsearch --reindex             # force a full rebuild of the cache
     agsearch --quality-report      # summarize local search quality telemetry
+    agsearch --quality-report --json  # machine-readable quality report
     agsearch _preview <sid> <seq> <thinking> <query...>   # (internal) fzf preview
 
 In the TUI the right pane previews the matched session, auto-scrolled to your match
@@ -950,6 +951,31 @@ def cmd_quality_report(path=SEARCH_LOG_PATH, out=sys.stdout):
     return 0
 
 
+def cmd_quality_report_json(path=SEARCH_LOG_PATH, out=sys.stdout):
+    """Print local search quality report as one JSON object."""
+    events = _load_search_events(path=path)
+    s = _quality_stats(events)
+    payload = {
+        "log_path": path,
+        "events": s["total"],
+        "zero_result_count": s["zero"],
+        "zero_result_rate": (s["zero"] / s["total"]) if s["total"] else 0.0,
+        "selection_count": s["selected"],
+        "selection_rate": (s["selected"] / s["total"]) if s["total"] else 0.0,
+        "avg_selected_rank": (sum(s["ranks"]) / len(s["ranks"])) if s["ranks"] else None,
+        "latency_avg_ms": (sum(s["latencies"]) / len(s["latencies"])) if s["latencies"] else None,
+        "latency_p95_ms": None,
+        "top_zero_queries": [{"query": q, "count": c} for q, c in s["top_zero_queries"]],
+        "top_queries": [{"query": q, "count": c} for q, c in s["top_queries"]],
+    }
+    if s["latencies"]:
+        ls = sorted(s["latencies"])
+        p95_i = max(0, min(len(ls) - 1, int(math.ceil(0.95 * len(ls))) - 1))
+        payload["latency_p95_ms"] = ls[p95_i]
+    out.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    return 0
+
+
 def _boost(f, usage, now):
     """Multiplier for how likely this session is the one you want, independent of the query:
     recent sessions and ones you resume often. Bounded, so it re-orders near-ties without ever
@@ -1116,7 +1142,7 @@ def main(argv):
         cmd_filter(argv[1:])
         return 0
 
-    no_fzf = no_resume = here = thinking = reindex = fuzzy = quality_report = False
+    no_fzf = no_resume = here = thinking = reindex = fuzzy = quality_report = quality_report_json = False
     project = None
     query_parts = []
     i = 0
@@ -1136,6 +1162,8 @@ def main(argv):
             reindex = True
         elif a == "--quality-report":
             quality_report = True
+        elif a == "--json":
+            quality_report_json = True
         elif a in ("-p", "--project"):
             i += 1
             project = argv[i] if i < len(argv) else None
@@ -1147,6 +1175,8 @@ def main(argv):
         i += 1
 
     if quality_report:
+        if quality_report_json:
+            return cmd_quality_report_json()
         return cmd_quality_report()
 
     query = " ".join(query_parts)
