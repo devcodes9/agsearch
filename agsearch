@@ -372,7 +372,7 @@ def print_matches(lines, query, limit=40):
     if not hits:
         print("No matches.", file=sys.stderr)
         return 1
-    terms = [t.lower() for t in query.split()]
+    terms = preview_match_terms(query)
     for l in hits[:limit]:
         print(fmt_row(l, terms))
     extra = len(hits) - limit
