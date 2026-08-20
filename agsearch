@@ -694,12 +694,34 @@ def resume_command(target, argv):
     return f"cd {shlex.quote(target)} && {cmd}" if target else cmd
 
 
+# Clipboard tools in preference order: macOS, then Wayland, then the two common X11 ones.
+CLIPBOARD_CMDS = (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"],
+                  ["xsel", "--clipboard", "--input"])
+
+
+def copy_to_clipboard(text, which=None, run=None):
+    """Put `text` on the clipboard with whatever tool exists. Returns the tool used, or "".
+
+    Best effort on purpose: the copy is a convenience (⌘F/^F straight to your query inside the
+    resumed session), so a machine with no clipboard tool should resume normally rather than
+    fail. Injectable which/run so the fallback order is testable without installing anything.
+    """
+    which = which or shutil.which
+    run = run or subprocess.run
+    for cmd in CLIPBOARD_CMDS:
+        if not which(cmd[0]):
+            continue
+        try:
+            run(cmd, input=text, text=True, check=False)
+            return cmd[0]
+        except OSError:
+            continue
+    return ""
+
+
 def resume(sid, cwd, query="", active=False):
     if query:
-        try:                                        # stash query so ⌘F finds it in-session
-            subprocess.run(["pbcopy"], input=query, text=True, check=False)
-        except OSError:
-            pass
+        copy_to_clipboard(query)                    # so ⌘F finds it inside the resumed session
     source, bin_, argv, cwd, target, cwd_exists = resume_plan(sid, cwd)
 
     # Leave a trace: if the launched CLI dies instantly the popup window vanishes with it,
