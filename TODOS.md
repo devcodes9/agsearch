@@ -9,15 +9,6 @@
 - **Context:** Uncommitted `agsearch` on `main` already implements `_launch_dir`. Close GitHub #10/#12 without merging them. Do not mix this into the ranking PR.
 - **Depends on / blocked by:** `git stash push -m launch-dir agsearch` before merging #13. Commit only when you explicitly sign.
 
-## Preview card for title, first-prompt, and typo #1s
-
-- **What:** After stem-on-body preview ships, show matches when ranker won via title, first prompt, or `_fuzzy_span`, so `0 match(es)` cannot happen on a #1 row.
-- **Why:** This cut only AND-matches ranking keys on message text.
-- **Pros:** Preview equals rank.
-- **Cons:** Second matching path inside `render_preview`.
-- **Context:** `render_preview` (`agsearch:566-577`) currently uses raw `query.split()` on body; this cut switches to `parse_query` keys on body only.
-- **Depends on / blocked by:** Stem-on-body preview PR. Frozen gold snapshot so you can list leftover 0-match queries.
-
 ## Cross-platform clipboard for query handoff
 
 - **What:** Replace the hardcoded `pbcopy` call with a best-effort helper that tries `pbcopy`, `wl-copy`, `xclip -selection clipboard`, then `xsel --clipboard --input`, gated on `shutil.which`.

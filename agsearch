@@ -524,6 +524,18 @@ def _snippet(text, terms, width=200):
     return _highlight(frag, live)
 
 
+def best_matching(texts, keys):
+    """Indices of the messages containing the most query words, and how many that was.
+
+    An exact AND when some message has them all, otherwise the closest ones. A blank card on
+    the result you were just told is the best match reads as a broken search, and the session
+    may well have been ranked there on its title or first prompt.
+    """
+    counts = [sum(1 for k in keys if _at_word_start(t.lower(), k)) for t in texts]
+    best = max(counts, default=0)
+    return [i for i, n in enumerate(counts) if n and n == best], best
+
+
 def render_preview(sid, thinking, query):
     """Compact preview card for one session (no full transcript — that's what resume is for).
 
@@ -572,24 +584,41 @@ def render_preview(sid, thinking, query):
     print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
           + (f" · {n_sub} subagent" if n_sub else "") + gone + "\033[0m")
 
+    def bookends():
+        """What the session was about, for when there is nothing better to show."""
+        first_user = next((r for r, _ in tagged if r[4] == "user"), None)
+        if first_user:
+            print(f"\n\033[2mopened with\033[0m  {_snippet(first_user[7], [], 220)}")
+        print(f"\033[2mlast\033[0m  {_label(rows[-1][4])} {_snippet(rows[-1][7], [], 220)}")
+
     if keys:
         # Same keys AND the same word-start rule as rank_sessions, matched on message text
         # only (not title/typo). Substring matching here would count `pr` inside `approach`
         # and report matches the ranker never saw.
-        matches = [(r, sub) for r, sub in tagged
-                   if all(_at_word_start(r[7].lower(), k) for k in keys)]
-        print(f"\n\033[1;33m● {len(matches)} match(es)\033[0m")
+        picked, best = best_matching([r[7] for r, _sub in tagged], keys)
+        matches = [tagged[i] for i in picked]
+
+        if best == len(keys):
+            head = f"● {len(matches)} match(es)"
+        elif best:
+            # No single message has every word, but this session was still ranked here for a
+            # reason. Showing the closest lines beats a blank card that reads as "your best
+            # result contains nothing you searched for".
+            head = f"● {len(matches)} partial · best message has {best} of {len(keys)} words"
+        else:
+            head = "● matched on title or first prompt, not in any message"
+        print(f"\n\033[1;33m{head}\033[0m")
+
         for r, sub in matches[:6]:
             tag = "\033[35m⤷\033[0m" if sub else " "
             print(f"{tag}{_label(r[4])} {_snippet(r[7], keys, 200)}")
         if len(matches) > 6:
             print(f"  \033[2m… {len(matches) - 6} more (resume to read)\033[0m")
+        if not matches:
+            bookends()
     else:
         # No query yet: just the bookends so you know what the session was about.
-        first_user = next((r for r, _ in tagged if r[4] == "user"), None)
-        if first_user:
-            print(f"\n\033[2mopened with\033[0m  {_snippet(first_user[7], [], 220)}")
-        print(f"\033[2mlast\033[0m  {_label(rows[-1][4])} {_snippet(rows[-1][7], [], 220)}")
+        bookends()
 
 
 # ------------------------------------------------------------------ resume
