@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .DS_Store
+# guildly agent workspace (linked project) — unstaged by default
+.guildly/
+gold.jsonl
+gold.local.jsonl
+gold-sessions.tsv
+gold-meta.json
