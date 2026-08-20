@@ -27,15 +27,6 @@
 - **Context:** Salvaged from closed GitHub #12; nothing else from that PR is wanted.
 - **Depends on / blocked by:** Nothing.
 
-## Count term frequency on word boundaries, not substrings
-
-- **What:** `rank_sessions` uses `body_hay.count(key)`, a raw substring count. Switch to a word-prefix count (`\b<key>`), keeping prefix semantics so stems still match their inflections.
-- **Why:** `pr` occurs as a substring in 700/718 snapshot sessions but as a word in only 182. It matches inside `previously`, `private`, `promise`, `prisma`. That collapses its idf to near zero and makes the `matched` coverage tiebreaker meaningless, so the discriminative term in the query gets drowned.
-- **Pros:** Measured on the frozen snapshot: recall@1 0.667 → 0.733 (`dependent PRs` moves 3 → 1), MRR 0.762 → 0.806. Word-prefix is the standard IR treatment, not a tuned heuristic.
-- **Cons:** `re.findall` per key per field is slower than `str.count` on a 718-row corpus. Measure before shipping.
-- **Context:** Ranking change, so per the design doc it needs its own PR with a stated @1 delta. Not part of the preview cut.
-- **Depends on / blocked by:** Frozen `gold-meta.json`, so the delta is measured against a fixed baseline.
-
 ## Short/numeric queries like `PR 1144` still rank ~128
 
 - **What:** A query mixing a short acronym with a precise identifier puts the right session around rank 128 even after the word-boundary fix. Decide how identifiers should score.
@@ -52,4 +43,13 @@
 - **Pros:** The number starts tracking the thing being optimized.
 - **Cons:** Same-title equivalence is a proxy. `expected_sids` as a list is more honest and more labeling work.
 - **Context:** Affects every future ranking delta, so worth settling before the next ranking PR.
+- **Depends on / blocked by:** Nothing.
+
+## Typo fallback fires on everything when the corpus is small
+
+- **What:** `rank_sessions` treats a term found in <= 2 sessions as a probable typo and falls back to subsequence matching. That threshold is absolute, so on a small corpus every term is "rare" and everything gets fuzzy-matched. Scale it to corpus size instead.
+- **Why:** A new user with a handful of sessions gets subsequence noise on their very first search, which is the worst possible first impression for a tool whose pitch is hit quality. Found while writing a two-row test fixture that silently matched everything.
+- **Pros:** Precision holds from session one, not just once the corpus is large.
+- **Cons:** Needs a rule that behaves at both ends. A fraction of `n` is the obvious move but is untested at either extreme.
+- **Context:** Invisible on the 718-session snapshot, so the gold set cannot detect it. Needs its own small-corpus fixtures.
 - **Depends on / blocked by:** Nothing.
