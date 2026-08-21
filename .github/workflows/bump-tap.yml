@@ -1,0 +1,47 @@
+name: bump-tap
+
+# Runs after a GitHub release is published: computes the new tarball's sha256
+# and opens the formula bump in devcodes9/homebrew-tap, so a release is one
+# `git push --tags` rather than a manual sha256 copy-paste.
+#
+# Requires a HOMEBREW_TAP_TOKEN secret — a PAT with `contents: write` on the
+# tap repo. Until that exists the job is skipped, not failed, so cutting a
+# release never blocks on tap plumbing.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to bump the formula to (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for the tap token
+        id: gate
+        run: |
+          if [ -n "${{ secrets.HOMEBREW_TAP_TOKEN }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set — skipping the tap bump."
+            echo "::notice::See docs/packaging/homebrew.md to finish tap setup."
+          fi
+
+      - uses: mislav/bump-homebrew-formula-action@v3
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          formula-name: agsearch
+          formula-path: Formula/agsearch.rb
+          homebrew-tap: devcodes9/homebrew-tap
+          tag-name: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          download-url: https://github.com/devcodes9/agsearch/archive/refs/tags/${{ github.event.inputs.tag || github.event.release.tag_name }}.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
