@@ -951,10 +951,12 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     scored = []
     for f, title_hay, first_hay, body_hay, rec in data:
         score = 0.0
-        matched = 0
+        matched = 0        # concepts covered, including typo-resolved ones — this is the badge
+        strong = 0         # concepts the session actually contains — this is what ranks
         for (term, _stem_unused), key, (tf, tf_first, it) in zip(qterms, keys, rec):
             if tf or tf_first or it:
                 matched += 1
+                strong += 1
                 score += idf[key] * (W_TITLE * it
                                      + W_FIRST * _bm25_tf(tf_first, len(first_hay), avg_first)
                                      + W_BODY * _bm25_tf(tf, len(body_hay), avg_body))
@@ -968,11 +970,18 @@ def rank_sessions(rows, qterms, usage=None, now=None):
                         matched += 1
                         score += 0.3
         if matched:
-            scored.append((score * _boost(f, usage, now), matched, f))
-    # Categorise first: your own sessions always outrank plugin/SDK-spawned runs. Then
-    # coverage (matched all your words), then relevance. Automation is demoted, never hidden.
-    scored.sort(key=lambda x: (x[2][C_KIND] == "auto", -x[1], -x[0]))
-    return scored
+            scored.append((score * _boost(f, usage, now), matched, strong, f))
+    # Categorise first: your own sessions always outrank plugin/SDK-spawned runs. Then coverage,
+    # counting only words the session really contains, then relevance. Automation is demoted,
+    # never hidden.
+    #
+    # Coverage deliberately ignores typo-resolved terms. A subsequence hit is a guess, and
+    # letting a guess count toward coverage let a session that merely contains `b i l l i n g`
+    # spread across a sentence outrank one genuinely about billing at three times the score.
+    # The guess still raises `score`, so a good fuzzy match can win on relevance; it just
+    # cannot win on breadth.
+    scored.sort(key=lambda x: (x[3][C_KIND] == "auto", -x[2], -x[0]))
+    return [(sc, m, f) for sc, m, _st, f in scored]
 
 
 def _smart_rows(rows, qterms, live=frozenset(), usage=None, gone=frozenset()):
