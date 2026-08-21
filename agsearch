@@ -390,9 +390,23 @@ def _session_path(sid):
     return None
 
 
-def _label(role):
-    return {"user": "\033[36myou\033[0m", "assistant": "\033[32mcc \033[0m",
-            "thinking": "\033[90mth \033[0m"}.get(role, (role + "   ")[:3])
+def _turn_header(role, source, is_sub):
+    """Chat-style role gutter for a preview turn: '▌ you', '▌ claude', '▌ ⤷ codex'.
+
+    The agent side is named after the source (claude/codex) so the preview mirrors the tool
+    the session actually came from — the way you saw it in Claude Code or Codex.
+    """
+    agent = "codex" if source == "codex" else "claude"
+    name = {"user": "you", "assistant": agent, "thinking": "thinking"}.get(role, role or "?")
+    if is_sub:
+        return f"\033[35m▌ ⤷ {name}\033[0m"
+    color = {"user": "36", "assistant": "32", "thinking": "90"}.get(role, "37")
+    return f"\033[{color}m▌ {name}\033[0m"
+
+
+def _turn(row, is_sub, source, keys, width=200):
+    """One conversation turn → [role gutter line, message snippet line]."""
+    return [_turn_header(row[4], source, is_sub), _snippet(row[7], keys, width)]
 
 
 # --- snippet cleanup: transcripts are full of payloads nobody wants to read in a result row.
@@ -524,12 +538,66 @@ def _snippet(text, terms, width=200):
     return _highlight(frag, live)
 
 
-def render_preview(sid, thinking, query):
-    """Compact preview card for one session (no full transcript — that's what resume is for).
+def _preview_lines(tagged, keys, source):
+    """Body of the preview, rendered as a chat transcript excerpt (see render_preview).
 
-    With a query: the matched lines only, highlighted. Without one: the bookends (first prompt
-    + last message) so you know what it was about. Merges subagent transcripts (tagged ⤷) so
-    their content is previewable too. Re-runs per keystroke via fzf's {q}.
+    `tagged` is chronological [(row, is_subagent)]. With a query: the matched turns in order,
+    anchored by the opening prompt so you always see what the chat was about. Without one: the
+    conversation arc — how it opened and where it ended. Returns a list of lines; the caller
+    prints them under the title/meta header. Kept pure so it's testable without fzf.
+    """
+    segs = []   # each segment is a list of lines; joined with a blank line between them
+
+    if keys:
+        matches = [(r, sub) for r, sub in tagged if all(k in r[7].lower() for k in keys)]
+        segs.append([f"\033[1;33m● {len(matches)} match(es)\033[0m"])
+        shown = matches[:6]
+        shown_rows = [r for r, _ in shown]
+        first_user = next(((r, sub) for r, sub in tagged if r[4] == "user"), None)
+        if first_user and first_user[0] not in shown_rows:
+            r, sub = first_user
+            segs.append(_turn(r, sub, source, []))     # anchor: what this chat was about
+            segs.append(["\033[2m⋯\033[0m"])
+        for r, sub in shown:
+            segs.append(_turn(r, sub, source, keys))
+        if len(matches) > 6:
+            segs.append([f"\033[2m… {len(matches) - 6} more (resume to read)\033[0m"])
+    else:
+        # Conversation arc: opening prompt → first reply … last turn.
+        idxs = []
+        fu = next((i for i, (r, _) in enumerate(tagged) if r[4] == "user"), None)
+        if fu is not None:
+            idxs.append(fu)
+            fr = next((i for i in range(fu + 1, len(tagged))
+                       if tagged[i][0][4] == "assistant"), None)
+            if fr is not None:
+                idxs.append(fr)
+        for i in idxs:
+            r, sub = tagged[i]
+            segs.append(_turn(r, sub, source, []))
+        last = len(tagged) - 1
+        if last not in idxs:
+            if idxs and last > idxs[-1] + 1:
+                segs.append(["\033[2m⋯\033[0m"])
+            r, sub = tagged[last]
+            segs.append(_turn(r, sub, source, []))
+
+    out = []
+    for i, seg in enumerate(segs):
+        if i:
+            out.append("")
+        out += seg
+    return out
+
+
+def render_preview(sid, thinking, query):
+    """Compact preview of one session, rendered turn-by-turn like the agent's own chat so a
+    glance is enough to recognise it (no full transcript — that's what resume is for).
+
+    Title + meta header, then a chat body built by _preview_lines: with a query, the matched
+    turns in order anchored by the opening prompt; without one, the conversation arc (how it
+    opened, where it ended). Merges subagent transcripts (tagged ⤷) so their content is
+    previewable too. Re-runs per keystroke via fzf's {q}.
     """
     thinking = str(thinking) == "1"
     try:
@@ -572,21 +640,12 @@ def render_preview(sid, thinking, query):
     print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
           + (f" · {n_sub} subagent" if n_sub else "") + gone + "\033[0m")
 
-    if keys:
-        # Same keys as rank_sessions, AND-matched on message text only (not title/typo).
-        matches = [(r, sub) for r, sub in tagged if all(k in r[7].lower() for k in keys)]
-        print(f"\n\033[1;33m● {len(matches)} match(es)\033[0m")
-        for r, sub in matches[:6]:
-            tag = "\033[35m⤷\033[0m" if sub else " "
-            print(f"{tag}{_label(r[4])} {_snippet(r[7], keys, 200)}")
-        if len(matches) > 6:
-            print(f"  \033[2m… {len(matches) - 6} more (resume to read)\033[0m")
-    else:
-        # No query yet: just the bookends so you know what the session was about.
-        first_user = next((r for r, _ in tagged if r[4] == "user"), None)
-        if first_user:
-            print(f"\n\033[2mopened with\033[0m  {_snippet(first_user[7], [], 220)}")
-        print(f"\033[2mlast\033[0m  {_label(rows[-1][4])} {_snippet(rows[-1][7], [], 220)}")
+    # Body reads like the agent's own chat — turn by turn — so a glance is enough to recognise
+    # it. Matches (AND-matched on message text, same keys as rank_sessions) or the arc.
+    body = _preview_lines(tagged, keys, source)
+    if body:
+        print()
+        print("\n".join(body))
 
 
 # ------------------------------------------------------------------ resume
