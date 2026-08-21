@@ -26,3 +26,12 @@
 - **Cons:** Same-title equivalence is a proxy. `expected_sids` as a list is more honest and more labeling work.
 - **Context:** Affects every future ranking delta, so worth settling before the next ranking PR.
 - **Depends on / blocked by:** Nothing.
+
+## Typo fallback fires on everything when the corpus is small
+
+- **What:** `rank_sessions` treats a term found in <= 2 sessions as a probable typo and falls back to subsequence matching. That threshold is absolute, so on a small corpus every term is "rare" and everything gets fuzzy-matched. Scale it to corpus size instead.
+- **Why:** A new user with a handful of sessions gets subsequence noise on their very first search, which is the worst possible first impression for a tool whose pitch is hit quality. Found while writing a two-row test fixture that silently matched everything.
+- **Pros:** Precision holds from session one, not just once the corpus is large.
+- **Cons:** Needs a rule that behaves at both ends. A fraction of `n` is the obvious move but is untested at either extreme.
+- **Context:** Invisible on the 718-session snapshot, so the gold set cannot detect it. Needs its own small-corpus fixtures.
+- **Depends on / blocked by:** Nothing.

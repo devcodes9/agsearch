@@ -580,8 +580,11 @@ def render_preview(sid, thinking, query):
           + (f" · {n_sub} subagent" if n_sub else "") + gone + "\033[0m")
 
     if keys:
-        # Same keys as rank_sessions, AND-matched on message text only (not title/typo).
-        matches = [(r, sub) for r, sub in tagged if all(k in r[7].lower() for k in keys)]
+        # Same keys AND the same word-start rule as rank_sessions, matched on message text
+        # only (not title/typo). Substring matching here would count `pr` inside `approach`
+        # and report matches the ranker never saw.
+        matches = [(r, sub) for r, sub in tagged
+                   if all(_at_word_start(r[7].lower(), k) for k in keys)]
         print(f"\n\033[1;33m● {len(matches)} match(es)\033[0m")
         for r, sub in matches[:6]:
             tag = "\033[35m⤷\033[0m" if sub else " "
@@ -938,6 +941,36 @@ def _boost(f, usage, now):
     return 1.0 + RECENCY_W * recency + USAGE_W * min(1.0, math.log1p(used) / math.log(6))
 
 
+def _at_word_start(hay, key):
+    """Does `key` occur at the start of a word in `hay`?
+
+    str.find is C-fast and this returns on the first real hit, so it stays cheap on a huge
+    transcript. Prefix semantics are kept deliberately: a stem must still match its
+    inflections (migrat -> migration/migrate/migrating).
+    """
+    i = hay.find(key)
+    while i != -1:
+        if i == 0 or not (hay[i - 1].isalnum() or hay[i - 1] == "_"):
+            return True
+        i = hay.find(key, i + 1)
+    return False
+
+
+def _key_probe(key):
+    """Term frequency of `key`, but zero unless it appears at a word start somewhere.
+
+    Plain `str.count` counts substrings, and that is what poisons ranking: `pr` is a substring
+    of 700/718 sessions but a word in 182, so its idf collapses to nothing and the coverage
+    tiebreaker stops discriminating. Presence is the part that has to be exact; the count
+    itself can stay a substring count because BM25 saturates tf anyway.
+    """
+    def probe(hay):
+        if not _at_word_start(hay, key):
+            return 0
+        return hay.count(key)
+    return probe
+
+
 def query_keys(qterms):
     """Ranking/preview keys: stem when it is long enough, else the raw term."""
     return [stem if len(stem) >= 3 else term for term, stem in qterms]
@@ -957,6 +990,7 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     keys = query_keys(qterms)
 
     # Pass 1: per-field term frequencies, plus document frequency per term for idf.
+    probes = [_key_probe(k) for k in keys]
     data = []
     df = dict.fromkeys(keys, 0)
     for f in rows:
@@ -964,10 +998,10 @@ def rank_sessions(rows, qterms, usage=None, now=None):
         first_hay = f[C_FIRST].lower()
         body_hay = f[C_BLOB]                     # already lowercased at index time
         rec = []
-        for key in keys:
-            tf = body_hay.count(key)
-            tf_first = first_hay.count(key)
-            it = key in title_hay
+        for key, probe in zip(keys, probes):
+            tf = probe(body_hay)
+            tf_first = probe(first_hay)
+            it = probe(title_hay) > 0
             if tf or tf_first or it:
                 df[key] += 1
             rec.append((tf, tf_first, it))
