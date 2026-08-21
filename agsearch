@@ -3,9 +3,9 @@
 agsearch — global full-text search across all your coding agent sessions.
 
 Claude Code and Codex CLI each store every session as local JSONL (~/.claude/projects/
-and ~/.codex/sessions/). Neither has cross-session search. This indexes all of them into
-one ranked search, shows the matched lines, and drops you straight back into the session
-with `claude --resume` or `codex resume`.
+and ~/.codex/sessions/). Their native pickers search session *metadata* — the title, the
+first prompt, the branch. This searches what was actually *said*, across both tools, and
+drops you straight back into the session with `claude --resume` or `codex resume`.
 
 Usage:
     agsearch                       # interactive fuzzy TUI (needs fzf)
