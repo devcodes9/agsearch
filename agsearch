@@ -941,22 +941,30 @@ def _boost(f, usage, now):
     return 1.0 + RECENCY_W * recency + USAGE_W * min(1.0, math.log1p(used) / math.log(6))
 
 
-def _at_word_start(hay, key):
-    """Does `key` occur at the start of a word in `hay`?
+def _is_word_char(c):
+    return c.isalnum() or c == "_"
+
+
+def _at_word_start(hay, key, whole=False):
+    """Does `key` occur at the start of a word in `hay`? With `whole`, as a complete word.
 
     str.find is C-fast and this returns on the first real hit, so it stays cheap on a huge
-    transcript. Prefix semantics are kept deliberately: a stem must still match its
-    inflections (migrat -> migration/migrate/migrating).
+    transcript. Prefix matching exists to undo stemming (migrat -> migration/migrate), so it
+    is applied only to keys that were actually stemmed. An unstemmed key is the whole word you
+    typed: `pr` should not match `print`, `previously` or `prisma`.
     """
+    n = len(key)
     i = hay.find(key)
     while i != -1:
-        if i == 0 or not (hay[i - 1].isalnum() or hay[i - 1] == "_"):
-            return True
+        if i == 0 or not _is_word_char(hay[i - 1]):
+            end = i + n
+            if not whole or end >= len(hay) or not _is_word_char(hay[end]):
+                return True
         i = hay.find(key, i + 1)
     return False
 
 
-def _key_probe(key):
+def _key_probe(key, whole=False):
     """Term frequency of `key`, but zero unless it appears at a word start somewhere.
 
     Plain `str.count` counts substrings, and that is what poisons ranking: `pr` is a substring
@@ -965,7 +973,7 @@ def _key_probe(key):
     itself can stay a substring count because BM25 saturates tf anyway.
     """
     def probe(hay):
-        if not _at_word_start(hay, key):
+        if not _at_word_start(hay, key, whole):
             return 0
         return hay.count(key)
     return probe
@@ -990,7 +998,8 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     keys = query_keys(qterms)
 
     # Pass 1: per-field term frequencies, plus document frequency per term for idf.
-    probes = [_key_probe(k) for k in keys]
+    # A key equal to the word typed was never stemmed, so match it whole.
+    probes = [_key_probe(k, whole=(k == t)) for (t, _st), k in zip(qterms, keys)]
     data = []
     df = dict.fromkeys(keys, 0)
     for f in rows:
@@ -1011,7 +1020,11 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     avg_first = sum(len(d[2]) for d in data) / len(data) if data else 1
     # Standard BM25 idf, shifted to stay positive even for terms in most documents.
     idf = {k: math.log(1 + (n - df[k] + 0.5) / (df[k] + 0.5)) for k in df}
-    typo = {k for k in df if df[k] <= 2}            # word barely exists → probably a typo, fuzzy it
+    # Barely-there word → probably a typo, so fall back to subsequence matching. Only for words
+    # long enough that an in-order subsequence is evidence of anything: `p...r` within six
+    # characters is satisfied by almost any English text, so short terms would fuzzy-match
+    # every session they are genuinely absent from.
+    typo = {k for k in df if df[k] <= 2 and len(k) >= 5}
 
     scored = []
     for f, title_hay, first_hay, body_hay, rec in data:
