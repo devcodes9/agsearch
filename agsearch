@@ -608,6 +608,30 @@ def _die(msg):
     sys.exit(1)
 
 
+def _launch_dir(session_path, cwd):
+    """The directory Claude actually filed this session under, or "" if undetermined.
+
+    Claude scopes `--resume <id>` by the directory it was launched from, storing the transcript
+    in ~/.claude/projects/<slug>/ where slug = the launch dir with non-alphanumerics replaced by
+    `-`. The `cwd` recorded on messages can be a SUBDIRECTORY of that launch dir, and resuming
+    from the subdirectory makes Claude look in the wrong project ("No conversation found").
+    Slugs can't be decoded back to a path unambiguously (real dashes are indistinguishable from
+    separators), so walk cwd's ancestors and take the one whose slug matches.
+    """
+    if not session_path or not cwd:
+        return ""
+    slug = os.path.basename(os.path.dirname(session_path))
+    d = os.path.abspath(os.path.expanduser(cwd))
+    while d and d != os.sep:
+        if re.sub(r"[^A-Za-z0-9]", "-", d) == slug:
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return ""
+
+
 def _nearest_existing_dir(path):
     """Closest existing ancestor of `path` (the path itself if it exists), else $HOME.
 
@@ -644,27 +668,50 @@ def _confirm_active(sid, bin_):
     return ok
 
 
+def resume_plan(sid, cwd):
+    """Where to resume from and what to run: (source, bin, argv, cwd, target, cwd_exists).
+
+    Shared by the launcher and by `--no-resume`, so the command printed for you to run by hand
+    can never drift from the one agsearch would have run itself.
+    """
+    try:
+        with open(INDEX_PATH) as fh:
+            info = json.load(fh).get(sid, {})
+    except (OSError, json.JSONDecodeError):
+        info = {}
+    source = info.get("source", "cc")
+    bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
+        else ("claude", ["claude", "--resume", sid])
+
+    # Claude looks for the session in the project of whatever directory it starts in, so resume
+    # from the dir it was launched in — not the `cwd` on the messages, which may be a subdir.
+    if source != "codex":
+        cwd = _launch_dir(info.get("path", ""), cwd) or cwd
+
+    # The recorded worktree may be long gone. Resume is id-based, so relocate to the nearest
+    # surviving ancestor (or $HOME) instead of refusing to launch.
+    cwd_exists = bool(cwd) and os.path.isdir(cwd)
+    target = cwd if cwd_exists else (_nearest_existing_dir(cwd) if cwd else "")
+    return source, bin_, argv, cwd, target, cwd_exists
+
+
+def resume_command(target, argv):
+    """A shell line you can paste. Worktree paths contain spaces often enough to quote."""
+    cmd = " ".join(argv)
+    return f"cd {shlex.quote(target)} && {cmd}" if target else cmd
+
+
 def resume(sid, cwd, query="", active=False):
     if query:
         try:                                        # stash query so ⌘F finds it in-session
             subprocess.run(["pbcopy"], input=query, text=True, check=False)
         except OSError:
             pass
-    try:
-        source = json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
-    except (OSError, json.JSONDecodeError):
-        source = "cc"
-    bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
-        else ("claude", ["claude", "--resume", sid])
-
-    # The recorded worktree may be long gone. Resume is id-based, so relocate to the nearest
-    # surviving ancestor (or $HOME) instead of refusing to launch.
-    cwd_exists = bool(cwd) and os.path.isdir(cwd)
-    target = cwd if cwd_exists else (_nearest_existing_dir(cwd) if cwd else "")
+    source, bin_, argv, cwd, target, cwd_exists = resume_plan(sid, cwd)
 
     # Leave a trace: if the launched CLI dies instantly the popup window vanishes with it,
     # so this log is the only way to see what was attempted.
-    note = f"cd {target or cwd} && {' '.join(argv)}"
+    note = resume_command(target or cwd, argv)
     try:
         with open(os.path.join(CACHE_DIR, "last-resume.log"), "a") as fh:
             fh.write(f"{note}   [source={source} cwd_exists={cwd_exists}"
@@ -1012,7 +1059,8 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     f = (sel.split(SEP) + [""] * 4)[:4]
     sid, cwd, active = f[0], f[1], f[3] == "1"
     if no_resume:
-        print(f"cd {cwd} && claude --resume {sid}")
+        _source, _bin, argv, _cwd, target, _exists = resume_plan(sid, cwd)
+        print(resume_command(target or cwd, argv))
         return 0
     resume(sid, cwd, typed, active=active)
     return 0

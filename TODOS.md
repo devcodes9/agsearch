@@ -1,14 +1,5 @@
 # TODOs
 
-## Source-aware quoted `--no-resume` and commit `_launch_dir`
-
-- **What:** Stash today's uncommitted `_launch_dir` Claude resume patch. After the ranking cut, commit it (when you 1Password-sign) and make `--no-resume` print `codex resume` vs `claude --resume` with `shlex.quote` on `cd`.
-- **Why:** Nested Claude project dirs attach wrong without `_launch_dir`. `--no-resume` always prints `cd {cwd} && claude --resume {sid}` (`agsearch:1030-1031`).
-- **Pros:** Attach trust; the working patch is not discarded.
-- **Cons:** Separate PR; not hit quality.
-- **Context:** Uncommitted `agsearch` on `main` already implements `_launch_dir`. Close GitHub #10/#12 without merging them. Do not mix this into the ranking PR.
-- **Depends on / blocked by:** `git stash push -m launch-dir agsearch` before merging #13. Commit only when you explicitly sign.
-
 ## Preview card for title, first-prompt, and typo #1s
 
 - **What:** After stem-on-body preview ships, show matches when ranker won via title, first prompt, or `_fuzzy_span`, so `0 match(es)` cannot happen on a #1 row.
