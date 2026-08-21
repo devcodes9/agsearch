@@ -15,7 +15,8 @@ over ~1,200 sessions is a few seconds; every warm search after that is ~0.1s.
 **Runs fully local.** Your sessions are indexed and searched on your machine — nothing is
 uploaded, and agsearch makes no network calls at all. It reads the JSONL your agent CLIs already
 wrote, caches the index under `~/.cache/agsearch/`, and the only programs it ever shells out to
-are `fzf`, `pbcopy`, and the `claude`/`codex` CLI you asked it to resume.
+are `fzf`, your clipboard tool (`pbcopy` / `wl-copy` / `xclip` / `xsel`), your pager, and the
+`claude`/`codex` CLI you asked it to resume.
 
 ## Install
 
@@ -37,19 +38,20 @@ works without fzf.
 
 ### Optional: global hotkey
 
-Bind it to a system-wide shortcut so search is always one keypress away. With
-[Hammerspoon](https://www.hammerspoon.org), this pops a floating terminal that *becomes* your
-resumed session on Enter:
+Bind it to a system-wide shortcut so search is always one keypress away. `--new-tab` opens
+agsearch in a **new tab of the terminal you already have open** — that tab then *becomes* your
+resumed session on Enter, instead of leaving a stray window behind on every search:
 
 ```lua
 hs.hotkey.bind({ "ctrl", "cmd" }, "k", function()
-  hs.osascript.applescript([[
-    tell application "iTerm"
-      activate
-      create window with default profile command "/bin/zsh -lic \"exec agsearch\""
-    end tell]])
+  hs.task.new("/Users/you/.local/bin/agsearch", nil, { "--new-tab" }):start()
 end)
 ```
+
+`--new-tab` knows tmux, kitty, WezTerm, iTerm2, Terminal.app, GNOME Terminal, Konsole and
+xfce4-terminal, preferring whatever you're currently inside. Force one with
+`AGSEARCH_TERMINAL=kitty`, or script an unsupported terminal yourself with
+`AGSEARCH_TERMINAL_CMD='myterm -e {cmd}'`.
 
 ## Use
 
@@ -58,18 +60,20 @@ agsearch                     # interactive TUI: one row per session, over all se
 agsearch "stripe tax id"     # TUI pre-filtered to a query
 agsearch --fuzzy "..."       # fuzzy matching instead of the default exact substring
 agsearch -n "stripe tax id"  # non-interactive: print ranked matches (no fzf)
-agsearch --here "..."        # only sessions from the current directory's project
+agsearch --here "..."        # start scoped to this directory's project (`ctrl-s` widens)
 agsearch --project myapp     # only sessions whose path contains 'myapp'
 agsearch --thinking          # also search assistant thinking blocks
+agsearch --new-tab           # open agsearch in a new tab of this terminal
 agsearch --reindex           # force a full cache rebuild
 ```
 
-The TUI lists **one clean row per session**: `date · project · N/T · title`, where `N/T` is how many
+The TUI lists **one clean row per session**: `age · project · N/T · title`, where `N/T` is how many
 of your query terms the session matched. Search runs over the full conversation text (agsearch does
 the matching itself and feeds fzf only matching sessions, so the list stays clean while every word is
 searchable). The right pane is a **compact preview card**, not a transcript dump: with a query it
 shows only the matched lines (highlighted); with no query, the bookends (first prompt + last message)
-so you know what the session was about. Full reading is what **resume** is for.
+so you know what the session was about, plus the exact command Enter is about to run. Full
+reading is `ctrl-o`.
 
 **Snippets are cleaned, not raw.** Transcripts are full of things nobody wants to read in a result
 row, so every snippet strips markdown noise (fences, headings, bullets, emphasis, link syntax) and
@@ -108,8 +112,29 @@ Search is **exact substring, AND-of-terms** by default (`stripe webhook` = both 
 work in either mode: `'word` force-exact, `^prefix`, `suffix$`, `!exclude`, `a | b` for OR. Pass
 `--fuzzy` for typo-tolerant matching.
 
-**Enter** resumes the session (cd's to its project dir, runs `claude --resume`), **Ctrl-/** toggles
-the preview. Add `--no-resume` to print the resume command instead.
+### Keys
+
+| key | what it does |
+|---|---|
+| `enter` | resume here — this terminal becomes the session |
+| `ctrl-t` | resume in a **new tab**, leaving the shell you were in alone |
+| `ctrl-y` | copy `cd … && claude --resume …` to the clipboard |
+| `ctrl-o` | read the **whole transcript** in your pager — no resume, no tokens spent |
+| `ctrl-s` | scope: all projects ⇄ only the directory you launched from |
+| `ctrl-g` | agent: claude+codex → claude only → codex only |
+| `ctrl-x` | automation: show or hide plugin/SDK-spawned runs |
+| `ctrl-r` | order: best match ⇄ newest first |
+| `ctrl-/` `ctrl-\` | toggle the preview / move it right → bottom → hidden |
+| `f1` | key list, in the preview pane |
+
+The four filter keys are the part `claude --resume` and `codex resume` don't have: you narrow
+**without retyping the query or restarting the process**, and the header always says what is
+currently on. Filters reset at every launch, so one you flipped last week can't quietly hide
+half your sessions today. Add `--no-resume` to print the resume command instead of running it.
+
+**Reading beats resuming, often.** Most of the time you only want to check that this is the
+right session, or lift one answer out of it — `ctrl-o` gives you the full conversation in a
+pager, matches marked `▶`, without starting a CLI or loading a context window.
 
 Resume is **id-based**, so a session whose project dir has since been deleted (a removed worktree)
 still resumes — agsearch cd's to the nearest surviving ancestor of the dead path (or `$HOME`) and

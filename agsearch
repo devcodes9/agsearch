@@ -7,21 +7,18 @@ and ~/.codex/sessions/). Neither has cross-session search. This indexes all of t
 one ranked search, shows the matched lines, and drops you straight back into the session
 with `claude --resume` or `codex resume`.
 
-Usage:
-    agsearch                       # interactive fuzzy TUI (needs fzf)
-    agsearch "stripe tax id"       # open the TUI pre-filtered to this query
-    agsearch -n "stripe tax id"    # non-interactive: print ranked matches, no fzf
-    agsearch --here "..."          # only sessions from the current directory's project
-    agsearch --project myapp       # only sessions whose path matches 'myapp'
-    agsearch --thinking            # also index assistant thinking blocks
-    agsearch --reindex             # force a full rebuild of the cache
-    agsearch _preview <sid> <seq> <thinking> <query...>   # (internal) fzf preview
+Run `agsearch --help` for the full flag and key list.
 
-In the TUI the right pane previews the matched session, auto-scrolled to your match
-(marked ▶) with a "match N of M" header. Enter resumes the session (and copies your
-query to the clipboard, so ⌘F → ⌘V → Enter jumps to it inside the replayed transcript).
-Resume is id-based: a session whose project dir was deleted still resumes, from the nearest
-surviving ancestor dir. Sessions that still look live are marked ● and confirm before resuming.
+The TUI is the product: a ranked one-row-per-session list, a preview card that shows the
+lines that matched, and live filters (scope / agent / automation / order) you flip with a
+keystroke instead of relaunching. Enter resumes in place; ctrl-t resumes in a NEW TAB of the
+terminal you're already in; ctrl-o reads the whole transcript in a pager without resuming at
+all; ctrl-y copies the resume command. Resume is id-based, so a session whose project dir was
+deleted still resumes, from the nearest surviving ancestor dir. Sessions that still look live
+are marked ● and confirm before resuming.
+
+Internal subcommands, all called back into by fzf: _filter, _preview, _transcript, _header,
+_help, _toggle, _copy, _tab.
 
 Warm runs are near-instant: parsed sessions are cached per-file and only re-parsed
 when their .jsonl mtime changes.
@@ -47,17 +44,13 @@ META_PATH = os.path.join(CACHE_DIR, "meta.json")
 SESSIONS_PATH = os.path.join(CACHE_DIR, "sessions.tsv")   # one line per session, for _filter
 SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subagent file paths]
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
+TUI_STATE_PATH = os.path.join(CACHE_DIR, "tui-state.json")  # live filter toggles for the fzf session
 
 CACHE_FMT = 4   # bump when the TSV column layout / keying changes, to invalidate old fragments
 
 # TSV columns (tab-separated, one row per message):
 #   0 session_id  1 cwd  2 gitBranch  3 iso_date  4 role  5 seq  6 title  7 text
 SEP = "\t"
-
-# Preview layout: this many header lines print before the first message, so a message
-# with sequence `seq` lands on preview line HEADER_LINES + 1 + seq. Keep in sync with
-# render_preview() — the fzf scroll offset is computed from it.
-HEADER_LINES = 5
 
 # A session whose transcript was appended to this recently is almost certainly still running
 # (an agent mid-turn, or a CLI you have open in another tab). Marked ● live in the list.
@@ -106,7 +99,12 @@ def _single_line(s, limit=400):
     return " ".join(s.split())[:limit]
 
 
-def parse_session(path, include_thinking=False):
+def _flag(v):
+    """Parse a flag that arrived either as a Python bool or as an argv string from fzf."""
+    return str(v).lower() in ("1", "true")
+
+
+def parse_session(path, include_thinking=False, limit=400):
     """Parse one .jsonl file into ordered index rows (8-field lists, seq assigned).
 
     Rows are keyed by each entry's `sessionId` field, not the filename. For normal sessions
@@ -153,9 +151,9 @@ def parse_session(path, include_thinking=False):
                     for b in content:
                         if isinstance(b, dict) and b.get("type") == "thinking" and b.get("thinking"):
                             rows.append([session_id, cwd, branch, ts, "thinking", title,
-                                         _single_line(b["thinking"])])
+                                         _single_line(b["thinking"], limit)])
 
-            text = _single_line(_flatten_content(msg.get("content", "")))
+            text = _single_line(_flatten_content(msg.get("content", "")), limit)
             if not text:
                 continue
             rows.append([session_id, cwd, branch, ts, role, title, text])
@@ -189,7 +187,7 @@ def _codex_title(user_texts):
     return ""
 
 
-def parse_codex_session(path, include_thinking=False):
+def parse_codex_session(path, include_thinking=False, limit=400):
     """Parse an OpenAI Codex CLI rollout file into the same 8-field row schema as Claude.
 
     Session id/cwd come from the `session_meta` entry; messages are `response_item` entries of
@@ -234,7 +232,7 @@ def parse_codex_session(path, include_thinking=False):
                 text = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("text"))
             else:
                 text = ""
-            text = _single_line(text)
+            text = _single_line(text, limit)
             if not text or text.lstrip().startswith(_CODEX_NOISE):
                 continue
             rows.append([sid, cwd, branch, o.get("timestamp") or ts0, p["role"], "", "", text])
@@ -249,6 +247,32 @@ def parse_codex_session(path, include_thinking=False):
 def _frag_path(jsonl_path):
     key = hashlib.sha1(jsonl_path.encode()).hexdigest()[:16]
     return os.path.join(FRAG_DIR, key + ".tsv")
+
+
+class _Progress:
+    """Counts freshly parsed sessions on stderr, and only when someone is watching.
+
+    Written to stderr so `agsearch -n … | grep` stays clean, and gated on isatty so the line
+    never lands in a pipe or in fzf's reload output.
+    """
+
+    def __init__(self, total, stream=None, every=25):
+        self.total = total
+        self.done = 0
+        self.every = every
+        self.stream = stream if stream is not None else sys.stderr
+        self.on = bool(getattr(self.stream, "isatty", lambda: False)())
+
+    def tick(self):
+        self.done += 1
+        if self.on and self.done % self.every == 0:
+            self.stream.write(f"\r\033[2mindexing… {self.done}/{self.total} sessions\033[0m")
+            self.stream.flush()
+
+    def close(self):
+        if self.on and self.done >= self.every:
+            self.stream.write("\r\033[K")
+            self.stream.flush()
 
 
 def build_index(include_thinking=False, force=False):
@@ -279,6 +303,9 @@ def build_index(include_thinking=False, force=False):
     lines = []
     sub_map = {}                        # parent sid -> [subagent file paths] (Claude only)
     index = {}                          # sid -> {source, path} for preview + resume routing
+    # A cold build over a thousand sessions takes seconds. Silence for seconds reads as a hang,
+    # so count the ones actually being parsed (cache hits are instant and not worth reporting).
+    progress = _Progress(len(files))
     for path, source, parser in files:
         try:
             mtime = os.path.getmtime(path)
@@ -290,6 +317,7 @@ def build_index(include_thinking=False, force=False):
             with open(frag, errors="replace") as fh:
                 frag_lines = fh.read().splitlines()
         else:
+            progress.tick()
             _sid, rows = parser(path, include_thinking)
             frag_lines = [SEP.join(r) for r in rows]
             with open(frag, "w") as fh:
@@ -315,6 +343,7 @@ def build_index(include_thinking=False, force=False):
     json.dump(new_meta, open(META_PATH, "w"))
     json.dump(sub_map, open(SUBMAP_PATH, "w"))
     json.dump(index, open(INDEX_PATH, "w"))
+    progress.close()
     return lines
 
 
@@ -346,15 +375,16 @@ def short_proj(cwd):
 
 
 def _highlight(text, terms, code="\033[1;30;43m"):
-    """Bold-highlight each query term (case-insensitive, first occurrence per term)."""
-    for t in terms:
-        if not t:
-            continue
-        low = text.lower()
-        idx = low.find(t)
-        if idx >= 0:
-            text = text[:idx] + code + text[idx:idx + len(t)] + "\033[0m" + text[idx + len(t):]
-    return text
+    """Highlight EVERY occurrence of every query term (case-insensitive).
+
+    One highlight per term was enough to prove the line matched, but the eye uses the density
+    of highlights to judge whether a line is *about* the term or merely mentions it.
+    """
+    live = sorted({t for t in terms if t}, key=len, reverse=True)
+    if not live:
+        return text
+    pat = re.compile("|".join(re.escape(t) for t in live), re.I)
+    return pat.sub(lambda m: code + m.group(0) + "\033[0m", text)
 
 
 ROW_TEXT_WIDTH = 160        # keeps -n rows one terminal line each, however big the message was
@@ -524,14 +554,12 @@ def _snippet(text, terms, width=200):
     return _highlight(frag, live)
 
 
-def render_preview(sid, thinking, query):
-    """Compact preview card for one session (no full transcript — that's what resume is for).
+def load_session_rows(sid, thinking=False, limit=400):
+    """(source, [(row, is_subagent)]) for one session, chronological.
 
-    With a query: the matched lines only, highlighted. Without one: the bookends (first prompt
-    + last message) so you know what it was about. Merges subagent transcripts (tagged ⤷) so
-    their content is previewable too. Re-runs per keystroke via fzf's {q}.
+    Shared by the preview card and the full-transcript reader so both see exactly the same
+    conversation, subagent turns folded in and all.
     """
-    thinking = str(thinking) == "1"
     try:
         index = json.load(open(INDEX_PATH))
     except (OSError, json.JSONDecodeError):
@@ -540,37 +568,64 @@ def render_preview(sid, thinking, query):
     source = info.get("source", "cc")
     path = info.get("path") or _session_path(sid)
 
-    # Gather (row, is_subagent) pairs. Codex sessions have no subagents; Claude folds them in.
     tagged = []
     if source == "codex":
         if path:
-            _s, rows0 = parse_codex_session(path, include_thinking=thinking)
+            _s, rows0 = parse_codex_session(path, include_thinking=thinking, limit=limit)
             tagged = [(r, False) for r in rows0]
     else:
         if path:
-            _s, prows = parse_session(path, include_thinking=thinking)
+            _s, prows = parse_session(path, include_thinking=thinking, limit=limit)
             tagged += [(r, False) for r in prows]
         try:
             submap = json.load(open(SUBMAP_PATH))
         except (OSError, json.JSONDecodeError):
             submap = {}
         for sp in submap.get(sid, [])[:40]:
-            _s, srows = parse_session(sp, include_thinking=thinking)
+            _s, srows = parse_session(sp, include_thinking=thinking, limit=limit)
             tagged += [(r, True) for r in srows]
-    if not tagged:
-        print("(session not found)")
-        return
     tagged.sort(key=lambda x: x[0][3])   # chronological by timestamp
-    rows = [r for r, _ in tagged]
+    return source, tagged
 
-    keys = query_keys(parse_query(query)) if query.strip() else []
+
+def _card_header(rows, tagged, source):
+    """Title line + the identity line under it: where, which branch, when, how big."""
     r0 = rows[0]
     n_sub = sum(1 for _, sub in tagged if sub)
     disp_title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
     print(f"\033[1m{disp_title[:80]}\033[0m")
-    gone = " · orig dir gone" if r0[1] and not os.path.isdir(r0[1]) else ""
-    print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
-          + (f" · {n_sub} subagent" if n_sub else "") + gone + "\033[0m")
+    bits = [short_proj(r0[1])]
+    if r0[2]:                                   # gitBranch: which line of work this session was
+        bits.append(f"\033[35m{r0[2][:28]}\033[0m\033[2m")
+    bits += [r0[3][:10], f"{len(rows)} msgs", "claude" if source != "codex" else "codex"]
+    if n_sub:
+        bits.append(f"{n_sub} subagent")
+    if r0[1] and not os.path.isdir(r0[1]):
+        bits.append("orig dir gone")
+    print("\033[2m" + " · ".join(bits) + "\033[0m")
+
+
+def render_preview(sid, thinking, query):
+    """Compact preview card for one session (no full transcript — that's ctrl-o / resume).
+
+    With a query: the matched lines only, highlighted. Without one: the bookends (first prompt
+    + last message) so you know what it was about. Merges subagent transcripts (tagged ⤷) so
+    their content is previewable too. Re-runs per keystroke via fzf's {q}.
+    """
+    thinking = _flag(thinking)
+    if sid == NO_SID:
+        print("\033[2mNothing to preview.\n\nEvery session is still indexed — the current "
+              "filters just exclude them all.\nThe header shows which key relaxes which "
+              "filter.\033[0m")
+        return
+    source, tagged = load_session_rows(sid, thinking)
+    if not tagged:
+        print("(session not found)")
+        return
+    rows = [r for r, _ in tagged]
+
+    keys = query_keys(parse_query(query)) if query.strip() else []
+    _card_header(rows, tagged, source)
 
     if keys:
         # Same keys as rank_sessions, AND-matched on message text only (not title/typo).
@@ -580,13 +635,199 @@ def render_preview(sid, thinking, query):
             tag = "\033[35m⤷\033[0m" if sub else " "
             print(f"{tag}{_label(r[4])} {_snippet(r[7], keys, 200)}")
         if len(matches) > 6:
-            print(f"  \033[2m… {len(matches) - 6} more (resume to read)\033[0m")
+            print(f"  \033[2m… {len(matches) - 6} more — ctrl-o reads the whole thing\033[0m")
     else:
         # No query yet: just the bookends so you know what the session was about.
         first_user = next((r for r, _ in tagged if r[4] == "user"), None)
         if first_user:
             print(f"\n\033[2mopened with\033[0m  {_snippet(first_user[7], [], 220)}")
         print(f"\033[2mlast\033[0m  {_label(rows[-1][4])} {_snippet(rows[-1][7], [], 220)}")
+
+    # What Enter is actually about to run. Resume relocates when the recorded dir is gone, and
+    # that surprise belongs in the preview, not in the scrollback after the CLI has taken over.
+    print(f"\n\033[2m⏎  {resume_command(sid, rows[0][1], source)}\033[0m")
+
+
+def render_transcript(sid, thinking=False, query=""):
+    """The whole conversation, readable, without resuming it.
+
+    Resuming to read costs a CLI start, a context load, and a session you then have to leave.
+    Most of the time you only wanted to check whether this is the right session, or to copy one
+    answer out of it. Matched lines are marked ▶ so you can jump between them in the pager.
+    """
+    thinking = _flag(thinking)
+    # Full message text here, not the 400-char index cap: this view exists to be read.
+    source, tagged = load_session_rows(sid, thinking, limit=100_000)
+    if not tagged:
+        print("(session not found)")
+        return
+    rows = [r for r, _ in tagged]
+    keys = query_keys(parse_query(query)) if query.strip() else []
+    _card_header(rows, tagged, source)
+    print(f"\033[2m{resume_command(sid, rows[0][1], source)}\033[0m\n")
+    for r, sub in tagged:
+        text = clean_snippet(r[7])
+        hit = bool(keys) and all(k in r[7].lower() for k in keys)
+        mark = "\033[1;33m▶\033[0m" if hit else " "
+        tag = "\033[35m⤷\033[0m" if sub else " "
+        print(f"{mark}{tag}{_label(r[4])} \033[2m{r[3][11:16]}\033[0m  "
+              f"{_highlight(text, keys) if keys else text}\n")
+
+
+# ------------------------------------------------------------------ clipboard
+
+# Tried in order; the first one present on PATH wins. macOS first because that's where the
+# ⌘F handoff matters most, then Wayland, then the two X11 standards.
+CLIPBOARDS = [("pbcopy", ["pbcopy"]),
+              ("wl-copy", ["wl-copy"]),
+              ("xclip", ["xclip", "-selection", "clipboard"]),
+              ("xsel", ["xsel", "--clipboard", "--input"])]
+
+
+def clipboard_argv(which=None):
+    """argv of the first available clipboard tool, or None if the box has none."""
+    which = which or shutil.which
+    for exe, argv in CLIPBOARDS:
+        if which(exe):
+            return argv
+    return None
+
+
+def copy_to_clipboard(text, which=None):
+    """Best-effort copy. Returns True if some clipboard tool accepted the text."""
+    argv = clipboard_argv(which)
+    if not argv:
+        return False
+    try:
+        subprocess.run(argv, input=text, text=True, check=False)
+        return True
+    except OSError:
+        return False
+
+
+# ------------------------------------------------------------------ terminal integration
+
+def _osa_str(s):
+    """Escape a Python string for embedding inside an AppleScript double-quoted literal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+_ITERM_OSA = '''
+tell application "iTerm"
+  activate
+  if (count of windows) = 0 then
+    create window with default profile command "{cmd}"
+  else
+    tell current window to create tab with default profile command "{cmd}"
+  end if
+end tell
+'''
+
+# Terminal.app has no "create tab" verb, so the tab has to come from a ⌘T keystroke (which needs
+# Accessibility permission). If System Events is blocked the script still errors out cleanly and
+# the caller falls back to a plain window.
+_TERMINAL_OSA = '''
+tell application "Terminal"
+  activate
+  if (count of windows) = 0 then
+    do script "{cmd}"
+  else
+    tell application "System Events" to keystroke "t" using command down
+    delay 0.3
+    do script "{cmd}" in front window
+  end if
+end tell
+'''
+
+
+def pick_terminal(env=None, which=None, platform=None, has_iterm=None):
+    """Name of the terminal to ask for a tab: AGSEARCH_TERMINAL, else the one you're inside.
+
+    The environment is the only signal that survives being launched from a hotkey daemon with
+    no controlling terminal, so it's checked before anything platform-specific. Returns "" when
+    nothing here knows how to make a tab.
+    """
+    env = os.environ if env is None else env
+    which = which or shutil.which
+    platform = platform or sys.platform
+    if has_iterm is None:
+        has_iterm = os.path.isdir("/Applications/iTerm.app")
+
+    forced = (env.get("AGSEARCH_TERMINAL") or "").lower()
+    if forced:
+        return forced
+    prog = (env.get("TERM_PROGRAM") or "").lower()
+    if env.get("TMUX") and which("tmux"):
+        return "tmux"
+    if env.get("KITTY_WINDOW_ID") and which("kitty"):
+        return "kitty"
+    if prog == "wezterm" and which("wezterm"):
+        return "wezterm"
+    if platform == "darwin":
+        # No TERM_PROGRAM means a hotkey launched us with no terminal at all; iTerm is then the
+        # better guess than Terminal.app, whose tabs need Accessibility permission.
+        return "iterm" if (prog.startswith("iterm") or (not prog and has_iterm)) else "terminal"
+    for exe in ("gnome-terminal", "konsole", "xfce4-terminal"):
+        if which(exe):
+            return exe
+    return ""
+
+
+def tab_launcher(inner, env=None, which=None, platform=None, has_iterm=None):
+    """argv that runs shell command `inner` in a NEW TAB of the terminal you're in.
+
+    "New tab, not new window" is the whole point: agsearch replaces itself with the resumed
+    CLI, so the tab it opens in *becomes* that session — a new window each time is what makes
+    a hotkey search feel like a stray popup instead of part of your terminal.
+
+    Returns None when no terminal here can be scripted, so the caller can say so plainly.
+    """
+    env = os.environ if env is None else env
+    shell = env.get("SHELL") or "/bin/sh"
+
+    override = env.get("AGSEARCH_TERMINAL_CMD")
+    if override:                       # escape hatch for terminals nothing here handles
+        return ["sh", "-c", override.replace("{cmd}", shlex.quote(inner))]
+
+    term = pick_terminal(env, which, platform, has_iterm)
+    osa = _osa_str("{} -lc {}".format(shell, shlex.quote(inner)))
+    return {
+        "tmux": ["tmux", "new-window", inner],
+        "kitty": ["kitty", "@", "launch", "--type=tab", shell, "-lc", inner],
+        "wezterm": ["wezterm", "cli", "spawn", "--", shell, "-lc", inner],
+        "iterm": ["osascript", "-e", _ITERM_OSA.format(cmd=osa)],
+        "terminal": ["osascript", "-e", _TERMINAL_OSA.format(cmd=osa)],
+        "gnome-terminal": ["gnome-terminal", "--tab", "--", shell, "-lc", inner],
+        "konsole": ["konsole", "--new-tab", "-e", shell, "-lc", inner],
+        "xfce4-terminal": ["xfce4-terminal", "--tab", "-x", shell, "-lc", inner],
+    }.get(term)
+
+
+def open_in_tab(inner):
+    """Run `inner` in a new terminal tab. Returns False when no terminal could be scripted."""
+    argv = tab_launcher(inner)
+    if not argv:
+        return False
+    try:
+        subprocess.run(argv, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError:
+        return False
+
+
+def resume_command(sid, cwd, source="cc"):
+    """The shell one-liner that reattaches this session, safe to paste anywhere."""
+    target = cwd if (cwd and os.path.isdir(cwd)) else _nearest_existing_dir(cwd)
+    bin_argv = ["codex", "resume", sid] if source == "codex" else ["claude", "--resume", sid]
+    return "cd {} && {}".format(shlex.quote(target or HOME), " ".join(bin_argv))
+
+
+def _source_of(sid):
+    try:
+        return json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
+    except (OSError, json.JSONDecodeError):
+        return "cc"
 
 
 # ------------------------------------------------------------------ resume
@@ -639,14 +880,8 @@ def _confirm_active(sid, bin_):
 
 def resume(sid, cwd, query="", active=False):
     if query:
-        try:                                        # stash query so ⌘F finds it in-session
-            subprocess.run(["pbcopy"], input=query, text=True, check=False)
-        except OSError:
-            pass
-    try:
-        source = json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
-    except (OSError, json.JSONDecodeError):
-        source = "cc"
+        copy_to_clipboard(query)                    # stash query so ⌘F finds it in-session
+    source = _source_of(sid)
     bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
         else ("claude", ["claude", "--resume", sid])
 
@@ -806,12 +1041,35 @@ def _row(sid, cwd, date, source, kind, title, badge, active=False, dir_gone=Fals
     mark = _AUTO_MARK if kind == "auto" else _SRC_MARK.get(source, "    ")
     live = _LIVE_MARK if active else "  "
     tail = _GONE_MARK if dir_gone else ""
-    body = (f"{date}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  "
+    age = f"{rel_age(date):<5}"
+    body = (f"{age}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  "
             f"{badge} {live}{title[:64]}{tail}")
     if kind == "auto":
-        body = (f"\033[2m{date}  \033[0m{_AUTO_MARK}\033[2m  {short_proj(cwd)[:15]:<15}  "
+        body = (f"\033[2m{age}  \033[0m{_AUTO_MARK}\033[2m  {short_proj(cwd)[:15]:<15}  "
                 f"{badge} \033[0m{live}\033[2m{title[:64]}\033[0m{tail}")
     return SEP.join([sid, cwd, body, "1" if active else "0"])
+
+
+# A row fzf can display but resume() must refuse: an empty list with no explanation reads as
+# "agsearch is broken" when it usually means one of the toggles is on.
+NO_SID = "-"
+
+
+def _empty_row(st, has_query):
+    st = st or {}
+    hints = []
+    if st.get("here"):
+        hints.append("ctrl-s widens to all projects")
+    if st.get("source") in ("cc", "codex"):
+        hints.append("ctrl-g re-includes the other agent")
+    if not st.get("auto", 1):
+        hints.append("ctrl-x re-includes automation")
+    if has_query and not hints:
+        hints.append("try fewer or more distinctive words")
+    if not hints:
+        hints.append("nothing indexed yet — run `agsearch --reindex`")
+    body = "\033[33mno sessions match\033[0m \033[2m· " + " · ".join(hints) + "\033[0m"
+    return SEP.join([NO_SID, "", body, "0"])
 
 
 def _bm25_tf(tf, dl, avgdl):
@@ -829,6 +1087,27 @@ def _age_days(date_str, now=None):
     except (ValueError, OverflowError, TypeError):
         return 3650.0                                # undated → treat as ancient, never boosted
     return max(0.0, ((now if now is not None else time.time()) - t) / 86400.0)
+
+
+def rel_age(date_str, now=None):
+    """Compact age for a list row: today / 3d / 2w / 5mo / 2y.
+
+    You scan a session list asking "was this the one from last week?", and an ISO date makes
+    you do that subtraction yourself for every row. The exact date is one keystroke away in
+    the preview card, which is where you look once you care about a specific session.
+    """
+    d = _age_days(date_str, now)
+    if d >= 3650:
+        return "?"
+    if d < 1:
+        return "today"
+    if d < 7:
+        return f"{int(d)}d"
+    if d < 56:
+        return f"{int(d // 7)}w"
+    if d < 365:
+        return f"{int(d // 30)}mo"
+    return f"{int(d // 365)}y"
 
 
 _RESUME_SID_RE = re.compile(r"(?:--resume|resume)\s+([0-9a-fA-F][0-9a-fA-F-]{7,})")
@@ -928,12 +1207,139 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     return scored
 
 
-def _smart_rows(rows, qterms, live=frozenset(), usage=None, gone=frozenset()):
-    """Render the ranked sessions as fzf rows. Badge = matched/total query terms."""
+def _smart_rows(rows, qterms, live=frozenset(), usage=None, gone=frozenset(), sort="smart"):
+    """Render the ranked sessions as fzf rows. Badge = matched/total query terms.
+
+    `sort="recent"` keeps the same match set — every session that actually matched — and only
+    reorders it newest-first, for when you remember *when* rather than *what*.
+    """
     total = len(qterms)
+    scored = rank_sessions(rows, qterms, usage)
+    if sort == "recent":
+        scored = sorted(scored, key=lambda x: x[2][C_DATE], reverse=True)
+        scored = sorted(scored, key=lambda x: x[2][C_KIND] == "auto")   # stable: auto stays last
     return [_row(f[C_SID], f[C_CWD], f[C_DATE], f[C_SOURCE], f[C_KIND], f[C_TITLE],
                  f"\033[33m{m}/{total}\033[0m", f[C_SID] in live, f[C_CWD] in gone)
-            for _score, m, f in rank_sessions(rows, qterms, usage)[:200]]
+            for _score, m, f in scored[:200]]
+
+
+# ------------------------------------------------------------------ live TUI filters
+#
+# The toggles below are what a session picker needs and `claude --resume` / `codex resume`
+# don't have: narrowing without retyping. They live in a small JSON file because fzf's
+# reload/preview commands are separate processes — there is no other channel between a
+# keystroke binding and the next `_filter` run. State is rewritten at every TUI launch, so a
+# filter can never silently persist into tomorrow's search.
+
+DEFAULT_TUI_STATE = {"here": 0, "auto": 1, "source": "all", "sort": "smart", "root": ""}
+SOURCE_CYCLE = ["all", "cc", "codex"]
+SORT_CYCLE = ["smart", "recent"]
+
+
+def read_tui_state(path=None):
+    st = dict(DEFAULT_TUI_STATE)
+    try:
+        with open(path or TUI_STATE_PATH) as fh:
+            got = json.load(fh)
+        if isinstance(got, dict):
+            st.update({k: v for k, v in got.items() if k in DEFAULT_TUI_STATE})
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return st
+
+
+def write_tui_state(st, path=None):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path or TUI_STATE_PATH, "w") as fh:
+            json.dump(st, fh)
+    except OSError:
+        pass
+
+
+def _cycle(options, cur):
+    """Next option after `cur`, wrapping; anything unrecognised restarts at the first."""
+    return options[(options.index(cur) + 1) % len(options) if cur in options else 0]
+
+
+def toggle_tui_state(name, st):
+    """Advance one toggle. Booleans flip; `source` and `sort` cycle through their options."""
+    st = dict(st)
+    if name in ("here", "auto"):
+        st[name] = 0 if st.get(name) else 1
+    elif name == "source":
+        st["source"] = _cycle(SOURCE_CYCLE, st.get("source"))
+    elif name == "sort":
+        st["sort"] = _cycle(SORT_CYCLE, st.get("sort"))
+    return st
+
+
+def apply_tui_state(rows, st):
+    """Drop the session rows the current toggles exclude (scope, agent, automation)."""
+    root = st.get("root") or ""
+    if st.get("here") and root:
+        rows = [f for f in rows
+                if f[C_CWD] == root or f[C_CWD].startswith(root.rstrip(os.sep) + os.sep)]
+    src = st.get("source", "all")
+    if src in ("cc", "codex"):
+        rows = [f for f in rows if f[C_SOURCE] == src]
+    if not st.get("auto", 1):
+        rows = [f for f in rows if f[C_KIND] != "auto"]
+    return rows
+
+
+# On/off labels for the header: the *current* value, not the action, so the header reads as
+# status. The key that changes it is printed beside it.
+def _state_bits(st):
+    scope = "this project" if st.get("here") else "all projects"
+    src = {"cc": "claude only", "codex": "codex only"}.get(st.get("source"), "claude+codex")
+    auto = "with automation" if st.get("auto", 1) else "yours only"
+    order = "best match" if st.get("sort", "smart") == "smart" else "newest first"
+    return scope, src, auto, order
+
+
+NOTICES = {"copied": "\033[32m✓ resume command copied to clipboard\033[0m"}
+
+
+def render_header(st=None, notice=""):
+    """Two-line fzf header: what the keys do, then what the filters currently are.
+
+    `notice` swaps the key line for a one-shot confirmation — an action like "copied" leaves
+    no visible trace otherwise, and a picker that silently does nothing feels broken.
+    """
+    st = read_tui_state() if st is None else st
+    scope, src, auto, order = _state_bits(st)
+    dim, off, bold = "\033[2m", "\033[0m", "\033[1m"
+    keys = (f"{bold}enter{off} resume  {bold}ctrl-t{off} resume in new tab  "
+            f"{bold}ctrl-y{off} copy cmd  {bold}ctrl-o{off} read transcript  {bold}f1{off} keys")
+    filt = (f"{dim}ctrl-s{off} {scope}  {dim}·{off}  {dim}ctrl-g{off} {src}  "
+            f"{dim}·{off}  {dim}ctrl-x{off} {auto}  {dim}·{off}  {dim}ctrl-r{off} {order}")
+    return (NOTICES.get(notice, keys)) + "\n" + filt
+
+
+KEY_HELP = [
+    ("enter", "resume this session here (this terminal becomes the session)"),
+    ("ctrl-t", "resume in a NEW TAB of this terminal, leaving your shell alone"),
+    ("ctrl-y", "copy the `cd … && claude --resume …` command to the clipboard"),
+    ("ctrl-o", "read the full transcript in a pager — no resume, no token cost"),
+    ("ctrl-s", "scope: all projects ⇄ only the directory you launched from"),
+    ("ctrl-g", "agent: claude+codex → claude only → codex only"),
+    ("ctrl-x", "automation: show or hide plugin/SDK-spawned runs"),
+    ("ctrl-r", "order: best match ⇄ newest first"),
+    ("ctrl-/", "show or hide this preview pane"),
+    ("ctrl-\\", "move the preview: right → bottom → hidden"),
+    ("ctrl-u / ctrl-d", "scroll the preview half a page"),
+    ("esc", "quit without resuming anything"),
+]
+
+
+def render_help():
+    print("\033[1magsearch keys\033[0m\n")
+    for key, what in KEY_HELP:
+        print(f"  \033[33m{key:<16}\033[0m {what}")
+    print("\n\033[2mSearch runs over every message of every session, not just titles.\n"
+          "Stopwords are dropped and words are stemmed, so 'how migration' finds 'migrate'.\n"
+          "Press any arrow key to return to the session preview.\033[0m")
 
 
 def parse_query(query):
@@ -952,24 +1358,77 @@ def cmd_filter(argv):
     BM25 over title / first prompt / transcript, then nudged by recency and resume count.
     """
     qterms = parse_query(" ".join(argv[1:]) if argv else "")
+    st = read_tui_state()
     try:
         raw = open(SESSIONS_PATH, errors="replace").read().splitlines()
     except OSError:
+        sys.stdout.write(_empty_row(st, bool(qterms)))
         return
     rows = [line.split(SEP) for line in raw if line.count(SEP) >= SESSION_COLS - 1]
+    rows = apply_tui_state(rows, st)
 
     live = _active_sids([f[C_SID] for f in rows])
     gone = _missing_dirs([f[C_CWD] for f in rows])
     if not qterms:                                  # initial list: yours first, then automation
         rows = sorted(rows, key=lambda f: f[C_KIND] == "auto")
-        out = [_row(f[C_SID], f[C_CWD], f[C_DATE], f[C_SOURCE], f[C_KIND], f[C_TITLE], "    ",
+        out = [_row(f[C_SID], f[C_CWD], f[C_DATE], f[C_SOURCE], f[C_KIND], f[C_TITLE], "   ",
                     f[C_SID] in live, f[C_CWD] in gone) for f in rows]
     else:
-        out = _smart_rows(rows, qterms, live, _usage_counts(), gone)
-    sys.stdout.write("\n".join(out))
+        out = _smart_rows(rows, qterms, live, _usage_counts(), gone, st.get("sort", "smart"))
+    sys.stdout.write("\n".join(out) if out else _empty_row(st, bool(qterms)))
 
 
-def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
+def fzf_args(self, thi, fz, query, here_root=""):
+    """Build the fzf argv. Split out from run_fzf so the binding table is testable.
+
+    Every toggle key is `execute-silent(_toggle …) + reload(_filter …) + transform-header(…)`:
+    the state file changes, the list is rebuilt from it, and the header re-renders to say what
+    just happened. Without that third action the filter would be invisible.
+    """
+    me = shlex.quote(self)
+    filter_cmd = "python3 {} _filter {} {{q}}".format(me, fz)
+    preview = "python3 {} _preview {{1}} {} {{q}}".format(me, thi)
+    header_cmd = "python3 {} _header".format(me)
+    help_cmd = "python3 {} _help".format(me)
+
+    def toggle(name):
+        return ("execute-silent(python3 {} _toggle {})+reload({})+transform-header({})"
+                .format(me, name, filter_cmd, header_cmd))
+
+    args = [
+        "fzf", "--ansi", "--delimiter", SEP, "--with-nth", "3", "--disabled",
+        "--print-query",                 # so the clipboard gets what you actually typed
+        "--header-first", "--info", "inline-right", "--pointer", "▌", "--marker", "▌",
+        "--prompt", "search all sessions ▸ ",
+        "--bind", "start:reload:" + filter_cmd,
+        "--bind", "change:reload:" + filter_cmd,
+        "--preview", preview,
+        "--preview-window", "right,58%,wrap",
+        "--header", render_header(),
+        # Filters — the thing `claude --resume` makes you restart the process to change.
+        "--bind", "ctrl-s:" + toggle("here"),
+        "--bind", "ctrl-g:" + toggle("source"),
+        "--bind", "ctrl-x:" + toggle("auto"),
+        "--bind", "ctrl-r:" + toggle("sort"),
+        # Ways out of a session that aren't "resume and hope".
+        "--bind", "ctrl-t:execute-silent(python3 {} _tab {{1}} {{2}} {{q}})+abort".format(me),
+        "--bind", "ctrl-y:execute-silent(python3 {} _copy {{1}} {{2}})"
+                  "+transform-header(python3 {} _header copied)".format(me, me),
+        "--bind", "ctrl-o:execute(python3 {} _transcript {{1}} {} {{q}} | "
+                  "${{PAGER:-less}} -R)".format(me, thi),
+        # Reading affordances.
+        "--bind", "f1:preview(" + help_cmd + ")",
+        "--bind", "ctrl-/:toggle-preview",
+        "--bind", "ctrl-\\:change-preview-window(down,60%,wrap|hidden|right,58%,wrap)",
+        "--bind", "ctrl-u:preview-half-page-up",
+        "--bind", "ctrl-d:preview-half-page-down",
+    ]
+    if query:
+        args += ["--query", query]
+    return args
+
+
+def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False, here=False):
     if not shutil.which("fzf"):
         print("fzf not installed. Falling back to non-interactive output.\n"
               "Install with: brew install fzf\n", file=sys.stderr)
@@ -977,23 +1436,14 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
 
     self = os.path.abspath(__file__)
     build_sessions(lines)                # refresh the per-session cache _filter reads
-    thi = "1" if thinking else "0"
-    fz = "1" if fuzzy else "0"
-    filter_cmd = "python3 {} _filter {} {{q}}".format(shlex.quote(self), fz)
-    preview = "python3 {} _preview {{1}} {} {{q}}".format(shlex.quote(self), thi)
-    args = [
-        "fzf", "--ansi", "--delimiter", SEP, "--with-nth", "3", "--disabled",
-        "--print-query",                 # so the clipboard gets what you actually typed
-        "--bind", "start:reload:" + filter_cmd,
-        "--bind", "change:reload:" + filter_cmd,
-        "--preview", preview,
-        "--preview-window", "right,58%,wrap",
-        "--header", "type to search all sessions · enter: resume (copies query for ⌘F) · "
-                    "ctrl-/: preview · ● = live session · 'orig dir gone' still resumes",
-        "--bind", "ctrl-/:toggle-preview",
-    ]
-    if query:
-        args += ["--query", query]
+    # Start every TUI from a known state, seeded by the flags you launched with, so a toggle
+    # you flipped last week can never quietly hide half your sessions today.
+    st = dict(DEFAULT_TUI_STATE)
+    st["here"] = 1 if here else 0
+    st["root"] = os.getcwd()
+    write_tui_state(st)
+
+    args = fzf_args(self, "1" if thinking else "0", "1" if fuzzy else "0", query)
     proc = subprocess.run(args, input="", text=True, capture_output=True)
     out = proc.stdout.split("\n")
     typed = out[0] if out else query     # --print-query puts the final query on line 1
@@ -1002,8 +1452,10 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
         return 0
     f = (sel.split(SEP) + [""] * 4)[:4]
     sid, cwd, active = f[0], f[1], f[3] == "1"
+    if not sid or sid == NO_SID:         # the "no sessions match" placeholder row
+        return 0
     if no_resume:
-        print(f"cd {cwd} && claude --resume {sid}")
+        print(resume_command(sid, cwd, _source_of(sid)))
         return 0
     resume(sid, cwd, typed, active=active)
     return 0
@@ -1011,18 +1463,92 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
 
 # ------------------------------------------------------------------ main
 
-def main(argv):
-    if argv and argv[0] == "_preview":
-        sid = argv[1] if len(argv) > 1 else ""
-        thinking = argv[2] if len(argv) > 2 else "0"
-        query = " ".join(argv[3:])
-        render_preview(sid, thinking, query)
+def _internal(argv):
+    """Subcommands fzf calls back into. Return an exit code, or None if this isn't one."""
+    cmd = argv[0] if argv else ""
+    if cmd == "_preview":
+        render_preview(argv[1] if len(argv) > 1 else "",
+                       argv[2] if len(argv) > 2 else "0", " ".join(argv[3:]))
         return 0
-    if argv and argv[0] == "_filter":
+    if cmd == "_filter":
         cmd_filter(argv[1:])
         return 0
+    if cmd == "_transcript":
+        render_transcript(argv[1] if len(argv) > 1 else "",
+                          argv[2] if len(argv) > 2 else "0", " ".join(argv[3:]))
+        return 0
+    if cmd == "_header":
+        print(render_header(notice=" ".join(argv[1:])))
+        return 0
+    if cmd == "_help":
+        render_help()
+        return 0
+    if cmd == "_toggle":
+        write_tui_state(toggle_tui_state(argv[1] if len(argv) > 1 else "", read_tui_state()))
+        return 0
+    if cmd == "_copy":
+        sid = argv[1] if len(argv) > 1 else ""
+        cwd = argv[2] if len(argv) > 2 else ""
+        if sid and sid != NO_SID:
+            copy_to_clipboard(resume_command(sid, cwd, _source_of(sid)))
+        return 0
+    if cmd == "_tab":
+        sid = argv[1] if len(argv) > 1 else ""
+        cwd = argv[2] if len(argv) > 2 else ""
+        query = " ".join(argv[3:])
+        if not sid or sid == NO_SID:
+            return 0
+        if query:
+            copy_to_clipboard(query)
+        if not open_in_tab(resume_command(sid, cwd, _source_of(sid))):
+            print("no scriptable terminal found for a new tab — set AGSEARCH_TERMINAL_CMD",
+                  file=sys.stderr)
+            return 1
+        return 0
+    return None
 
-    no_fzf = no_resume = here = thinking = reindex = fuzzy = False
+
+HELP = """agsearch — one search across every Claude Code and Codex CLI session, then resume it.
+
+usage:
+  agsearch                      interactive search over all sessions
+  agsearch "stripe tax id"      open the search pre-filtered to a query
+  agsearch -n "stripe tax id"   non-interactive: print ranked matches, no fzf
+
+options:
+  --here                start scoped to the current directory's project (ctrl-s toggles)
+  -p, --project NAME    only sessions whose path contains NAME
+  --thinking            also search assistant thinking blocks
+  --fuzzy               fuzzy matching instead of exact substring
+  --new-tab             open agsearch in a NEW TAB of this terminal, then exit
+  --no-resume           print the resume command instead of running it
+  --reindex             force a full cache rebuild
+  -n, --no-fzf          plain ranked output
+  -h, --help            this text
+
+in the search:
+{keys}
+
+environment:
+  AGSEARCH_TERMINAL      force the terminal used by --new-tab / ctrl-t
+                         (tmux | kitty | wezterm | iterm | terminal)
+  AGSEARCH_TERMINAL_CMD  full override; "{{cmd}}" is replaced by the command to run
+
+Everything runs locally: sessions are read from ~/.claude/projects and ~/.codex/sessions,
+cached under ~/.cache/agsearch, and never leave the machine."""
+
+
+def print_help():
+    keys = "\n".join(f"  {k:<16} {what}" for k, what in KEY_HELP)
+    print(HELP.format(keys=keys))
+
+
+def main(argv):
+    code = _internal(argv)
+    if code is not None:
+        return code
+
+    no_fzf = no_resume = here = thinking = reindex = fuzzy = new_tab = False
     project = None
     query_parts = []
     i = 0
@@ -1040,26 +1566,41 @@ def main(argv):
             fuzzy = True
         elif a == "--reindex":
             reindex = True
+        elif a == "--new-tab":
+            new_tab = True
         elif a in ("-p", "--project"):
             i += 1
             project = argv[i] if i < len(argv) else None
         elif a in ("-h", "--help"):
-            print(__doc__)
+            print_help()
             return 0
         else:
             query_parts.append(a)
         i += 1
 
     query = " ".join(query_parts)
+    if new_tab:
+        # Relaunch ourselves in a tab of the current terminal. This is what a global hotkey
+        # should bind to: the tab it opens becomes the resumed session, instead of leaving a
+        # stray window behind every time you search.
+        rest = [a for a in argv if a != "--new-tab"]
+        inner = "exec " + " ".join(shlex.quote(x) for x in [os.path.abspath(__file__)] + rest)
+        if open_in_tab(inner):
+            return 0
+        print("no scriptable terminal found — set AGSEARCH_TERMINAL_CMD, or drop --new-tab",
+              file=sys.stderr)
+        return 1
+
     lines = build_index(include_thinking=thinking, force=reindex)
-    lines = apply_scope(lines, here=here, project=project)
+    # --here is a *starting* scope in the TUI (ctrl-s widens it), so only -n applies it here.
+    lines = apply_scope(lines, here=here and no_fzf, project=project)
     if not lines:
         print("No indexed sessions found.", file=sys.stderr)
         return 1
 
     if no_fzf:
         return print_matches(lines, query)
-    return run_fzf(lines, query, thinking=thinking, no_resume=no_resume, fuzzy=fuzzy)
+    return run_fzf(lines, query, thinking=thinking, no_resume=no_resume, fuzzy=fuzzy, here=here)
 
 
 if __name__ == "__main__":
