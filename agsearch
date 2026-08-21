@@ -39,14 +39,26 @@ HOME = os.path.expanduser("~")
 PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "agsearch")
-FRAG_DIR = os.path.join(CACHE_DIR, "frag")
-META_PATH = os.path.join(CACHE_DIR, "meta.json")
-SESSIONS_PATH = os.path.join(CACHE_DIR, "sessions.tsv")   # one line per session, for _filter
 SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subagent file paths]
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
 TUI_STATE_PATH = os.path.join(CACHE_DIR, "tui-state.json")  # live filter toggles for the fzf session
 
 CACHE_FMT = 6   # bump when the TSV column layout / keying changes, to invalidate old fragments
+
+
+def cache_paths(thinking=False):
+    """(frag dir, meta.json, sessions.tsv) for one indexing mode.
+
+    --thinking changes what every fragment contains, so the two modes get their own caches
+    rather than invalidating each other: alternating between plain and --thinking used to
+    force a full re-parse of the whole corpus, in both directions, every time. Thinking is
+    the opt-in mode, so it's the one that moves into a subdirectory — an existing plain cache
+    stays exactly where it is and keeps working.
+    """
+    root = os.path.join(CACHE_DIR, "thinking") if thinking else CACHE_DIR
+    return (os.path.join(root, "frag"), os.path.join(root, "meta.json"),
+            os.path.join(root, "sessions.tsv"))
+
 
 # TSV columns (tab-separated, one row per message):
 #   0 session_id  1 cwd  2 gitBranch  3 iso_date  4 role  5 seq  6 title  7 text
@@ -251,9 +263,9 @@ def parse_codex_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
 
 # ------------------------------------------------------------------ cache
 
-def _frag_path(jsonl_path):
+def _frag_path(jsonl_path, frag_dir):
     key = hashlib.sha1(jsonl_path.encode()).hexdigest()[:16]
-    return os.path.join(FRAG_DIR, key + ".tsv")
+    return os.path.join(frag_dir, key + ".tsv")
 
 
 class _Progress:
@@ -284,11 +296,12 @@ class _Progress:
 
 def build_index(include_thinking=False, force=False):
     """Return the full index as a list of TSV strings, refreshing per-file caches."""
-    os.makedirs(FRAG_DIR, exist_ok=True)
+    frag_dir, meta_path, _sessions = cache_paths(include_thinking)
+    os.makedirs(frag_dir, exist_ok=True)
     meta = {}
-    if os.path.exists(META_PATH) and not force:
+    if os.path.exists(meta_path) and not force:
         try:
-            meta = json.load(open(META_PATH))
+            meta = json.load(open(meta_path))
         except (OSError, json.JSONDecodeError):
             meta = {}
     if meta.get("_thinking") != include_thinking or meta.get("_fmt") != CACHE_FMT:
@@ -313,12 +326,13 @@ def build_index(include_thinking=False, force=False):
     # A cold build over a thousand sessions takes seconds. Silence for seconds reads as a hang,
     # so count the ones actually being parsed (cache hits are instant and not worth reporting).
     progress = _Progress(len(files))
+    think_rows = 0
     for path, source, parser in files:
         try:
             mtime = os.path.getmtime(path)
         except OSError:
             continue
-        frag = _frag_path(path)
+        frag = _frag_path(path, frag_dir)
         live_frags.add(os.path.basename(frag))
         if not force and meta.get(path) == mtime and os.path.exists(frag):
             with open(frag, errors="replace") as fh:
@@ -326,6 +340,7 @@ def build_index(include_thinking=False, force=False):
         else:
             progress.tick()
             _sid, rows = parser(path, include_thinking)
+            think_rows += sum(1 for r in rows if r[4] == "thinking")
             frag_lines = [SEP.join(r) for r in rows]
             with open(frag, "w") as fh:
                 fh.write("\n".join(frag_lines))
@@ -340,17 +355,23 @@ def build_index(include_thinking=False, force=False):
         else:
             index[sid0] = {"source": source, "path": path}
 
-    for fn in os.listdir(FRAG_DIR):     # drop fragments for deleted sessions
+    for fn in os.listdir(frag_dir):     # drop fragments for deleted sessions
         if fn not in live_frags:
             try:
-                os.remove(os.path.join(FRAG_DIR, fn))
+                os.remove(os.path.join(frag_dir, fn))
             except OSError:
                 pass
 
-    json.dump(new_meta, open(META_PATH, "w"))
-    json.dump(sub_map, open(SUBMAP_PATH, "w"))
-    json.dump(index, open(INDEX_PATH, "w"))
+    for path_, payload in ((meta_path, new_meta), (SUBMAP_PATH, sub_map), (INDEX_PATH, index)):
+        with open(path_, "w") as fh:
+            json.dump(payload, fh)
     progress.close()
+    # Claude Code stores thinking blocks encrypted — `"thinking": ""` plus an opaque signature —
+    # so on most corpora --thinking has nothing to index and silently changes nothing. Say so
+    # once, on the build where we actually looked, rather than letting it read as a broken flag.
+    if include_thinking and progress.done > 50 and not think_rows:
+        print("note: --thinking indexed 0 thinking blocks — this agent stores them encrypted, "
+              "so there is no thinking text to search.", file=sys.stderr)
     return lines
 
 
@@ -1029,8 +1050,8 @@ def group_sessions(lines):
     return sessions
 
 
-def build_sessions(lines):
-    """Write one line per session to SESSIONS_PATH: sid, cwd, date, source, kind, title, first
+def build_sessions(lines, thinking=False):
+    """Write one line per session to this mode's sessions.tsv: sid, cwd, date, source, kind, title, first
     prompt, blob. The first prompt is stored separately from the blob so ranking can weight it
     as its own field — it's the strongest single signal of what a session is about."""
     try:
@@ -1048,7 +1069,9 @@ def build_sessions(lines):
         blob = _single_line(" · ".join(s["texts"]), 2_000_000).lower()
         out.append(SEP.join([s["sid"], s["cwd"], s["date"][:10], source, s["kind"],
                              title, first, blob]))
-    with open(SESSIONS_PATH, "w") as fh:
+    _frag, _meta, sessions_path = cache_paths(thinking)
+    os.makedirs(os.path.dirname(sessions_path), exist_ok=True)
+    with open(sessions_path, "w") as fh:
         fh.write("\n".join(out))
 
 
@@ -1494,11 +1517,14 @@ def cmd_filter(argv):
     title` while full conversation text is searched. Smart ranking: stopwords dropped, words
     stemmed (migration≈migrate), matched per-concept (exact→stem→typo), scored by weighted
     BM25 over title / first prompt / transcript, then nudged by recency and resume count.
+
+    argv[0] is the thinking flag, which picks the cache this TUI was launched against.
     """
     qterms = parse_query(" ".join(argv[1:]) if argv else "")
+    _frag, _meta, sessions_path = cache_paths(_flag(argv[0]) if argv else False)
     st = read_tui_state()
     try:
-        raw = open(SESSIONS_PATH, errors="replace").read().splitlines()
+        raw = open(sessions_path, errors="replace").read().splitlines()
     except OSError:
         sys.stdout.write(_empty_row(st, bool(qterms)))
         return
@@ -1516,7 +1542,7 @@ def cmd_filter(argv):
     sys.stdout.write("\n".join(out) if out else _empty_row(st, bool(qterms)))
 
 
-def fzf_args(self, thi, fz, query, here_root=""):
+def fzf_args(self, thi, query):
     """Build the fzf argv. Split out from run_fzf so the binding table is testable.
 
     Every toggle key is `execute-silent(_toggle …) + reload(_filter …) + transform-header(…)`:
@@ -1524,7 +1550,7 @@ def fzf_args(self, thi, fz, query, here_root=""):
     just happened. Without that third action the filter would be invisible.
     """
     me = shlex.quote(self)
-    filter_cmd = "python3 {} _filter {} {{q}}".format(me, fz)
+    filter_cmd = "python3 {} _filter {} {{q}}".format(me, thi)
     preview = "python3 {} _preview {{1}} {} {{q}}".format(me, thi)
     header_cmd = "python3 {} _header".format(me)
     help_cmd = "python3 {} _help".format(me)
@@ -1566,6 +1592,8 @@ def fzf_args(self, thi, fz, query, here_root=""):
     return args
 
 
+# `fuzzy` is accepted and unused: --fuzzy has never been wired into cmd_filter, which does the
+# matching. Tracked in TODOS.md rather than quietly dropped from the CLI here.
 def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False, here=False):
     if not shutil.which("fzf"):
         print("fzf not installed. Falling back to non-interactive output.\n"
@@ -1573,7 +1601,7 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False, here=Fal
         return print_matches(lines, query)
 
     self = os.path.abspath(__file__)
-    build_sessions(lines)                # refresh the per-session cache _filter reads
+    build_sessions(lines, thinking)      # refresh the per-session cache _filter reads
     # Start every TUI from a known state, seeded by the flags you launched with, so a toggle
     # you flipped last week can never quietly hide half your sessions today.
     st = dict(DEFAULT_TUI_STATE)
@@ -1581,7 +1609,7 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False, here=Fal
     st["root"] = os.getcwd()
     write_tui_state(st)
 
-    args = fzf_args(self, "1" if thinking else "0", "1" if fuzzy else "0", query)
+    args = fzf_args(self, "1" if thinking else "0", query)
     proc = subprocess.run(args, input="", text=True, capture_output=True)
     out = proc.stdout.split("\n")
     typed = out[0] if out else query     # --print-query puts the final query on line 1

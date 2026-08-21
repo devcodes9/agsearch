@@ -1,4 +1,6 @@
+import contextlib
 import inspect
+import io
 import json
 import os
 import re
@@ -187,14 +189,14 @@ class FzfWiringTests(unittest.TestCase):
     """fzf reaches back into this script by name; a typo'd subcommand only shows up at runtime."""
 
     def test_every_bound_subcommand_is_one_main_dispatches(self):
-        args = ag.fzf_args("/bin/agsearch", "0", "0", "")
+        args = ag.fzf_args("/bin/agsearch", "0", "")
         used = set(re.findall(r"agsearch (_\w+)", " ".join(args)))
         declared = set(re.findall(r'cmd == "(_\w+)"', inspect.getsource(ag._internal)))
         self.assertTrue(used, "no subcommands found in the fzf bindings")
         self.assertEqual(used - declared, set())
 
     def test_toggle_keys_reload_and_refresh_the_header(self):
-        args = ag.fzf_args("/bin/agsearch", "0", "0", "")
+        args = ag.fzf_args("/bin/agsearch", "0", "")
         for key in ("ctrl-s", "ctrl-g", "ctrl-x", "ctrl-r"):
             bind = next(a for a in args if a.startswith(key + ":"))
             self.assertIn("_toggle", bind)
@@ -211,3 +213,80 @@ class FzfWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CachePathTests(unittest.TestCase):
+    """--thinking used to invalidate the whole corpus in both directions; separate caches fix it."""
+
+    def test_the_two_modes_share_no_files(self):
+        plain = ag.cache_paths(False)
+        thinking = ag.cache_paths(True)
+        self.assertEqual(len(set(plain) & set(thinking)), 0)
+
+    def test_plain_mode_keeps_the_existing_cache_layout(self):
+        frag, meta, sessions = ag.cache_paths(False)
+        self.assertEqual(frag, os.path.join(ag.CACHE_DIR, "frag"))
+        self.assertEqual(meta, os.path.join(ag.CACHE_DIR, "meta.json"))
+        self.assertEqual(sessions, os.path.join(ag.CACHE_DIR, "sessions.tsv"))
+
+    def test_thinking_mode_lives_in_its_own_subdirectory(self):
+        for path in ag.cache_paths(True):
+            self.assertTrue(path.startswith(os.path.join(ag.CACHE_DIR, "thinking") + os.sep), path)
+
+    def test_the_filter_subprocess_reads_the_cache_its_tui_was_launched_against(self):
+        args = ag.fzf_args("/bin/agsearch", "1", "")
+        reload_bind = next(a for a in args if a.startswith("change:reload:"))
+        self.assertIn("_filter 1 ", reload_bind)
+
+
+class BuildIndexTests(unittest.TestCase):
+    """Exercises build_index end-to-end against a throwaway corpus and cache."""
+
+    def _corpus(self, root, n, thinking_text):
+        os.makedirs(os.path.join(root, "proj"))
+        for i in range(n):
+            block = {"type": "thinking", "thinking": thinking_text, "signature": "opaque"}
+            rows = [
+                {"type": "user", "sessionId": f"s{i}", "cwd": "/repo", "timestamp": "2026-08-20",
+                 "message": {"role": "user", "content": "index me"}},
+                {"type": "assistant", "sessionId": f"s{i}", "cwd": "/repo",
+                 "timestamp": "2026-08-20", "message": {"role": "assistant",
+                                                        "content": [block, {"type": "text",
+                                                                            "text": "answer"}]}},
+            ]
+            with open(os.path.join(root, "proj", f"s{i}.jsonl"), "w") as fh:
+                fh.write("\n".join(json.dumps(r) for r in rows))
+
+    def _build(self, thinking_text, thinking=True):
+        """Returns (index lines, stderr) for a fresh corpus + cache."""
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus, cache = os.path.join(tmp, "corpus"), os.path.join(tmp, "cache")
+            self._corpus(corpus, 60, thinking_text)
+            saved = (ag.PROJECTS_DIR, ag.CODEX_DIR, ag.CACHE_DIR)
+            ag.PROJECTS_DIR, ag.CODEX_DIR, ag.CACHE_DIR = corpus, os.path.join(tmp, "none"), cache
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err):
+                    lines = ag.build_index(include_thinking=thinking)
+                # Snapshot while the temp tree still exists — the caller sees only paths.
+                written = {os.path.relpath(os.path.join(d, f), cache)
+                           for d, _s, fs in os.walk(cache) for f in fs}
+                return lines, err.getvalue(), written
+            finally:
+                ag.PROJECTS_DIR, ag.CODEX_DIR, ag.CACHE_DIR = saved
+
+    def test_encrypted_thinking_blocks_produce_a_note_instead_of_silence(self):
+        lines, err, _written = self._build("")        # what Claude Code actually writes
+        self.assertIn("--thinking indexed 0 thinking blocks", err)
+        self.assertFalse([l for l in lines if l.split(ag.SEP)[4] == "thinking"])
+
+    def test_readable_thinking_blocks_are_indexed_and_draw_no_note(self):
+        lines, err, _written = self._build("a real thought")
+        self.assertEqual(err, "")
+        self.assertEqual(len([l for l in lines if l.split(ag.SEP)[4] == "thinking"]), 60)
+
+    def test_thinking_mode_writes_only_its_own_cache(self):
+        _lines, _err, written = self._build("a real thought", thinking=True)
+        self.assertIn(os.path.join("thinking", "meta.json"), written)
+        self.assertTrue(any(f.startswith("thinking" + os.sep + "frag") for f in written), written)
+        self.assertFalse([f for f in written if f.startswith("frag" + os.sep)], written)

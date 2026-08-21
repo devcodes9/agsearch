@@ -153,7 +153,13 @@ press **⌘F → ⌘V → Enter** to jump to the match in whatever iTerm holds i
 - Walks `~/.claude/projects/**/*.jsonl`, extracting user prompts and assistant text (one row
   per message) plus each session's AI-generated title.
 - Caches parsed output per file, keyed by mtime, under `~/.cache/agsearch/`. Only changed
-  sessions are re-parsed on later runs.
+  sessions are re-parsed on later runs, so **you never index by hand** — every run refreshes
+  incrementally (~0.15s warm, ~3s for a cold build over ~970 sessions). `--reindex` is a
+  force-rebuild escape hatch, not routine maintenance.
+- `--thinking` keeps its own cache under `~/.cache/agsearch/thinking/`, so alternating between
+  plain and `--thinking` doesn't make each invalidate the other. Note that Claude Code stores
+  thinking blocks *encrypted* (`"thinking": ""` plus a signature), so on most corpora there is
+  no thinking text to search — agsearch says so once rather than looking broken.
 - The JSONL schema is Claude Code's internal format and can change between releases; if a
   future version breaks parsing, run `agsearch --reindex` after updating the extractor.
 - Ranking is covered by tests over a small fixture corpus (no dependencies, no fixtures on

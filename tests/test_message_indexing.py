@@ -56,10 +56,11 @@ class MessageIndexingTests(unittest.TestCase):
             _s, rows = ag.parse_session(p)
             lines += [ag.SEP.join(r) for r in rows]
         d = tempfile.mkdtemp()
-        ag.SESSIONS_PATH = os.path.join(d, "sessions.tsv")
+        ag.CACHE_DIR = d        # build_sessions derives sessions.tsv from the mode's cache dir
         ag.INDEX_PATH = os.path.join(d, "index.json")
         ag.build_sessions(lines)
-        rows = [l.split(ag.SEP) for l in open(ag.SESSIONS_PATH).read().splitlines() if l]
+        sessions_path = ag.cache_paths(False)[2]
+        rows = [l.split(ag.SEP) for l in open(sessions_path).read().splitlines() if l]
         rows = [r for r in rows if len(r) >= ag.SESSION_COLS]
         ranked = ag.rank_sessions(rows, ag.parse_query("zizmor"), usage={}, now=0)
         self.assertEqual([r[2][ag.C_SID] for r in ranked], ["sid_hit"])
