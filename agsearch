@@ -48,7 +48,7 @@ SESSIONS_PATH = os.path.join(CACHE_DIR, "sessions.tsv")   # one line per session
 SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subagent file paths]
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
 
-CACHE_FMT = 4   # bump when the TSV column layout / keying changes, to invalidate old fragments
+CACHE_FMT = 6   # bump when the TSV column layout / keying changes, to invalidate old fragments
 
 # TSV columns (tab-separated, one row per message):
 #   0 session_id  1 cwd  2 gitBranch  3 iso_date  4 role  5 seq  6 title  7 text
@@ -76,6 +76,13 @@ BM25_B = 0.65
 W_TITLE = 2.0
 W_FIRST = 2.5
 W_BODY = 1.0
+# How much of each message is searchable. _single_line defaults to 400, which is right for a
+# preview line and wrong for an index: 41% of messages are longer than that, and capping there
+# left only 19% of transcript text searchable at all. A table or a summary a few hundred
+# characters into a reply was simply absent from the index, so no amount of ranking could
+# surface it. 4,000 recovers that; 20,000 measured no better and costs more to scan.
+MSG_INDEX_CHARS = 4_000
+
 RECENCY_HALFLIFE_DAYS = 45.0
 RECENCY_W = 0.35          # max multiplier bump for a session from today
 USAGE_W = 0.30            # max multiplier bump for a session you resume often
@@ -155,7 +162,7 @@ def parse_session(path, include_thinking=False):
                             rows.append([session_id, cwd, branch, ts, "thinking", title,
                                          _single_line(b["thinking"])])
 
-            text = _single_line(_flatten_content(msg.get("content", "")))
+            text = _single_line(_flatten_content(msg.get("content", "")), MSG_INDEX_CHARS)
             if not text:
                 continue
             rows.append([session_id, cwd, branch, ts, role, title, text])
@@ -234,7 +241,7 @@ def parse_codex_session(path, include_thinking=False):
                 text = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("text"))
             else:
                 text = ""
-            text = _single_line(text)
+            text = _single_line(text, MSG_INDEX_CHARS)
             if not text or text.lstrip().startswith(_CODEX_NOISE):
                 continue
             rows.append([sid, cwd, branch, o.get("timestamp") or ts0, p["role"], "", "", text])
@@ -604,6 +611,30 @@ def _die(msg):
     sys.exit(1)
 
 
+def _launch_dir(session_path, cwd):
+    """The directory Claude actually filed this session under, or "" if undetermined.
+
+    Claude scopes `--resume <id>` by the directory it was launched from, storing the transcript
+    in ~/.claude/projects/<slug>/ where slug = the launch dir with non-alphanumerics replaced by
+    `-`. The `cwd` recorded on messages can be a SUBDIRECTORY of that launch dir, and resuming
+    from the subdirectory makes Claude look in the wrong project ("No conversation found").
+    Slugs can't be decoded back to a path unambiguously (real dashes are indistinguishable from
+    separators), so walk cwd's ancestors and take the one whose slug matches.
+    """
+    if not session_path or not cwd:
+        return ""
+    slug = os.path.basename(os.path.dirname(session_path))
+    d = os.path.abspath(os.path.expanduser(cwd))
+    while d and d != os.sep:
+        if re.sub(r"[^A-Za-z0-9]", "-", d) == slug:
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return ""
+
+
 def _nearest_existing_dir(path):
     """Closest existing ancestor of `path` (the path itself if it exists), else $HOME.
 
@@ -640,27 +671,72 @@ def _confirm_active(sid, bin_):
     return ok
 
 
-def resume(sid, cwd, query="", active=False):
-    if query:
-        try:                                        # stash query so ⌘F finds it in-session
-            subprocess.run(["pbcopy"], input=query, text=True, check=False)
-        except OSError:
-            pass
+def resume_plan(sid, cwd):
+    """Where to resume from and what to run: (source, bin, argv, cwd, target, cwd_exists).
+
+    Shared by the launcher and by `--no-resume`, so the command printed for you to run by hand
+    can never drift from the one agsearch would have run itself.
+    """
     try:
-        source = json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
+        with open(INDEX_PATH) as fh:
+            info = json.load(fh).get(sid, {})
     except (OSError, json.JSONDecodeError):
-        source = "cc"
+        info = {}
+    source = info.get("source", "cc")
     bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
         else ("claude", ["claude", "--resume", sid])
+
+    # Claude looks for the session in the project of whatever directory it starts in, so resume
+    # from the dir it was launched in — not the `cwd` on the messages, which may be a subdir.
+    if source != "codex":
+        cwd = _launch_dir(info.get("path", ""), cwd) or cwd
 
     # The recorded worktree may be long gone. Resume is id-based, so relocate to the nearest
     # surviving ancestor (or $HOME) instead of refusing to launch.
     cwd_exists = bool(cwd) and os.path.isdir(cwd)
     target = cwd if cwd_exists else (_nearest_existing_dir(cwd) if cwd else "")
+    return source, bin_, argv, cwd, target, cwd_exists
+
+
+def resume_command(target, argv):
+    """A shell line you can paste. Worktree paths contain spaces often enough to quote."""
+    cmd = " ".join(argv)
+    return f"cd {shlex.quote(target)} && {cmd}" if target else cmd
+
+
+# Clipboard tools in preference order: macOS, then Wayland, then the two common X11 ones.
+CLIPBOARD_CMDS = (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"],
+                  ["xsel", "--clipboard", "--input"])
+
+
+def copy_to_clipboard(text, which=None, run=None):
+    """Put `text` on the clipboard with whatever tool exists. Returns the tool used, or "".
+
+    Best effort on purpose: the copy is a convenience (⌘F/^F straight to your query inside the
+    resumed session), so a machine with no clipboard tool should resume normally rather than
+    fail. Injectable which/run so the fallback order is testable without installing anything.
+    """
+    which = which or shutil.which
+    run = run or subprocess.run
+    for cmd in CLIPBOARD_CMDS:
+        if not which(cmd[0]):
+            continue
+        try:
+            run(cmd, input=text, text=True, check=False)
+            return cmd[0]
+        except OSError:
+            continue
+    return ""
+
+
+def resume(sid, cwd, query="", active=False):
+    if query:
+        copy_to_clipboard(query)                    # so ⌘F finds it inside the resumed session
+    source, bin_, argv, cwd, target, cwd_exists = resume_plan(sid, cwd)
 
     # Leave a trace: if the launched CLI dies instantly the popup window vanishes with it,
     # so this log is the only way to see what was attempted.
-    note = f"cd {target or cwd} && {' '.join(argv)}"
+    note = resume_command(target or cwd, argv)
     try:
         with open(os.path.join(CACHE_DIR, "last-resume.log"), "a") as fh:
             fh.write(f"{note}   [source={source} cwd_exists={cwd_exists}"
@@ -728,7 +804,9 @@ def build_sessions(lines):
         title = _single_line(s["title"] or "(untitled)", 90)
         first = _single_line(s["first_user"], 400)
         # High cap so full sessions (incl. folded-in subagent content) stay searchable.
-        blob = _single_line(" · ".join(s["texts"]), 2_000_000)
+        # Stored lowercased: ranking is the only reader, and it would otherwise re-lower the
+        # whole corpus on every keystroke. Nothing displays this column.
+        blob = _single_line(" · ".join(s["texts"]), 2_000_000).lower()
         out.append(SEP.join([s["sid"], s["cwd"], s["date"][:10], source, s["kind"],
                              title, first, blob]))
     with open(SESSIONS_PATH, "w") as fh:
@@ -918,7 +996,7 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     for f in rows:
         title_hay = (f[C_TITLE] + " " + short_proj(f[C_CWD])).lower()
         first_hay = f[C_FIRST].lower()
-        body_hay = f[C_BLOB].lower()
+        body_hay = f[C_BLOB]                     # already lowercased at index time
         rec = []
         for key, probe in zip(keys, probes):
             tf = probe(body_hay)
@@ -1037,7 +1115,8 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     f = (sel.split(SEP) + [""] * 4)[:4]
     sid, cwd, active = f[0], f[1], f[3] == "1"
     if no_resume:
-        print(f"cd {cwd} && claude --resume {sid}")
+        _source, _bin, argv, _cwd, target, _exists = resume_plan(sid, cwd)
+        print(resume_command(target or cwd, argv))
         return 0
     resume(sid, cwd, typed, active=active)
     return 0
