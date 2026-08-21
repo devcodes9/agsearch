@@ -48,7 +48,7 @@ SESSIONS_PATH = os.path.join(CACHE_DIR, "sessions.tsv")   # one line per session
 SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subagent file paths]
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
 
-CACHE_FMT = 5   # bump when the TSV column layout / keying changes, to invalidate old fragments
+CACHE_FMT = 6   # bump when the TSV column layout / keying changes, to invalidate old fragments
 
 # TSV columns (tab-separated, one row per message):
 #   0 session_id  1 cwd  2 gitBranch  3 iso_date  4 role  5 seq  6 title  7 text
@@ -76,6 +76,13 @@ BM25_B = 0.65
 W_TITLE = 2.0
 W_FIRST = 2.5
 W_BODY = 1.0
+# How much of each message is searchable. _single_line defaults to 400, which is right for a
+# preview line and wrong for an index: 41% of messages are longer than that, and capping there
+# left only 19% of transcript text searchable at all. A table or a summary a few hundred
+# characters into a reply was simply absent from the index, so no amount of ranking could
+# surface it. 4,000 recovers that; 20,000 measured no better and costs more to scan.
+MSG_INDEX_CHARS = 4_000
+
 RECENCY_HALFLIFE_DAYS = 45.0
 RECENCY_W = 0.35          # max multiplier bump for a session from today
 USAGE_W = 0.30            # max multiplier bump for a session you resume often
@@ -155,7 +162,7 @@ def parse_session(path, include_thinking=False):
                             rows.append([session_id, cwd, branch, ts, "thinking", title,
                                          _single_line(b["thinking"])])
 
-            text = _single_line(_flatten_content(msg.get("content", "")))
+            text = _single_line(_flatten_content(msg.get("content", "")), MSG_INDEX_CHARS)
             if not text:
                 continue
             rows.append([session_id, cwd, branch, ts, role, title, text])
@@ -234,7 +241,7 @@ def parse_codex_session(path, include_thinking=False):
                 text = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("text"))
             else:
                 text = ""
-            text = _single_line(text)
+            text = _single_line(text, MSG_INDEX_CHARS)
             if not text or text.lstrip().startswith(_CODEX_NOISE):
                 continue
             rows.append([sid, cwd, branch, o.get("timestamp") or ts0, p["role"], "", "", text])
