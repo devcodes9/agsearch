@@ -15,7 +15,8 @@ over ~1,200 sessions is a few seconds; every warm search after that is ~0.1s.
 **Runs fully local.** Your sessions are indexed and searched on your machine — nothing is
 uploaded, and agsearch makes no network calls at all. It reads the JSONL your agent CLIs already
 wrote, caches the index under `~/.cache/agsearch/`, and the only programs it ever shells out to
-are `fzf`, `pbcopy`, and the `claude`/`codex` CLI you asked it to resume.
+are `fzf`, a clipboard tool (`pbcopy`, `wl-copy`, `xclip` or `xsel`, whichever you have), and
+the `claude`/`codex` CLI you asked it to resume.
 
 ## Install
 
