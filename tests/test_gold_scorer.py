@@ -79,8 +79,40 @@ def rank_sids(ag, rows, query, usage=None, now=None):
     return [item[2][ag.C_SID] for item in ranked]
 
 
-def recall_at_1(expected_sid, ranked_sids):
-    return bool(ranked_sids) and ranked_sids[0] == expected_sid
+def accepted_sids(rec):
+    """The sids that satisfy this query.
+
+    Sessions get continued, duplicated and forked, so more than one can be the right answer.
+    Pinning exactly one then scores a MISS for returning an equally good session, which makes
+    every ranking delta measured against this list a little bit wrong. `expected_sids` takes a
+    list; `expected_sid` stays valid for the single-answer case.
+    """
+    if rec.get("expected_sids"):
+        return list(rec["expected_sids"])
+    return [rec["expected_sid"]]
+
+
+def recall_at_1(expected, ranked_sids):
+    """expected is a sid or a list of acceptable sids."""
+    if not ranked_sids:
+        return False
+    if isinstance(expected, str):
+        return ranked_sids[0] == expected
+    return ranked_sids[0] in expected
+
+
+def same_title_hit(ag, rows_by_sid, expected, top_sid):
+    """Did we return a different session carrying the SAME title as an accepted one?
+
+    Reported next to the strict number rather than folded into it. Identical titles are a
+    proxy for "the user would have been happy", not proof, so it stays a diagnostic: a wide
+    gap between the two columns means the labels need splitting, not that ranking improved.
+    """
+    if isinstance(expected, str):
+        expected = [expected]
+    titles = {rows_by_sid[s][ag.C_TITLE] for s in expected if s in rows_by_sid}
+    top = rows_by_sid.get(top_sid)
+    return bool(top) and top[ag.C_TITLE] in titles
 
 
 def snapshot_live_sessions(ag, now=None):
@@ -122,6 +154,33 @@ class GoldScorerTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError) as ctx:
             load_snapshot_meta(ag, missing)
         self.assertIn("missing frozen snapshot meta", str(ctx.exception))
+
+    def test_a_list_of_acceptable_sids_counts_as_a_hit(self):
+        ag = load_agsearch()
+        self.assertTrue(recall_at_1(["sid_a", "sid_b"], ["sid_b", "sid_a"]))
+        self.assertFalse(recall_at_1(["sid_a", "sid_b"], ["sid_c", "sid_a"]))
+
+    def test_single_expected_sid_still_works(self):
+        self.assertEqual(accepted_sids({"expected_sid": "sid_a"}), ["sid_a"])
+        self.assertEqual(accepted_sids({"expected_sid": "sid_a",
+                                        "expected_sids": ["sid_a", "sid_b"]}),
+                         ["sid_a", "sid_b"])
+
+    def test_same_title_is_reported_separately_not_counted_as_a_hit(self):
+        ag = load_agsearch()
+        rows = {
+            "sid_want": ["sid_want", "/r", "2026-08-19", "cc", "cli", "Compass migration", "x", "y"],
+            "sid_twin": ["sid_twin", "/r", "2026-08-19", "cc", "cli", "Compass migration", "x", "y"],
+            "sid_other": ["sid_other", "/r", "2026-08-19", "cc", "cli", "Unrelated", "x", "y"],
+        }
+        self.assertTrue(same_title_hit(ag, rows, "sid_want", "sid_twin"))
+        self.assertFalse(same_title_hit(ag, rows, "sid_want", "sid_other"))
+        # and it is not silently folded into recall@1
+        self.assertFalse(recall_at_1("sid_want", ["sid_twin"]))
+
+    def test_same_title_check_survives_a_sid_missing_from_the_snapshot(self):
+        ag = load_agsearch()
+        self.assertFalse(same_title_hit(ag, {}, "sid_gone", "sid_also_gone"))
 
     def test_frozen_meta_keeps_score_stable_as_usage_grows(self):
         """Same corpus + same frozen meta must rank identically however often you resume."""
@@ -166,15 +225,27 @@ def _cmd_score():
         raise SystemExit(f"missing {path} — add JSONL lines: {{\"query\":\"...\",\"expected_sid\":\"...\"}}")
     rows = load_snapshot_rows(ag)
     gold = load_gold_jsonl(path)
-    hits = 0
+    by_sid = {r[ag.C_SID]: r for r in rows}
+    hits = tolerant = 0
     for rec in gold:
         sids = rank_sids(ag, rows, rec["query"])
-        ok = recall_at_1(rec["expected_sid"], sids)
+        accepted = accepted_sids(rec)
+        ok = recall_at_1(accepted, sids)
+        top = sids[0] if sids else ""
+        dup = (not ok) and same_title_hit(ag, by_sid, accepted, top)
         hits += int(ok)
-        rank = sids.index(rec["expected_sid"]) + 1 if rec["expected_sid"] in sids else None
-        print(f"{'OK' if ok else 'MISS'}\t@1={ok}\trank={rank}\t{rec['query']}\t{rec['expected_sid']}")
+        tolerant += int(ok or dup)
+        ranks = [sids.index(s) + 1 for s in accepted if s in sids]
+        rank = min(ranks) if ranks else None
+        flag = "OK" if ok else ("DUP" if dup else "MISS")
+        print(f"{flag}\t@1={ok}\trank={rank}\t{rec['query']}\t{','.join(accepted)}")
+        if dup:
+            print(f"\t\tsame title returned instead: {top}"
+                  f"  ({by_sid[top][ag.C_TITLE][:60]!r})")
     n = len(gold)
     print(f"recall@1\t{hits}/{n}\t{hits / n if n else 0:.3f}")
+    print(f"same-title-tolerant\t{tolerant}/{n}\t{tolerant / n if n else 0:.3f}"
+          f"\t(diagnostic: a gap here means labels need splitting)")
 
 
 def main(argv):
