@@ -15,6 +15,7 @@ Usage:
     agsearch --project myapp       # only sessions whose path matches 'myapp'
     agsearch --thinking            # also index assistant thinking blocks
     agsearch --reindex             # force a full rebuild of the cache
+    agsearch --version             # print the installed version and exit
     agsearch _preview <sid> <seq> <thinking> <query...>   # (internal) fzf preview
 
 In the TUI the right pane previews the matched session, auto-scrolled to your match
@@ -26,6 +27,8 @@ surviving ancestor dir. Sessions that still look live are marked ● and confirm
 Warm runs are near-instant: parsed sessions are cached per-file and only re-parsed
 when their .jsonl mtime changes.
 """
+
+__version__ = "0.1.0"
 
 import os
 import re
@@ -1209,6 +1212,9 @@ def main(argv):
             project = argv[i] if i < len(argv) else None
         elif a in ("-h", "--help"):
             print(__doc__)
+            return 0
+        elif a in ("-V", "--version"):
+            print("agsearch " + __version__)
             return 0
         else:
             query_parts.append(a)
