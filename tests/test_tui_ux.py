@@ -1,4 +1,5 @@
 import inspect
+import json
 import os
 import re
 import shlex
@@ -29,14 +30,7 @@ class RelAgeTests(unittest.TestCase):
         self.assertEqual(ag.rel_age(""), "?")
 
 
-class ClipboardTests(unittest.TestCase):
-    def test_prefers_first_available_tool(self):
-        self.assertEqual(ag.clipboard_argv(which=lambda e: e == "xclip" or None),
-                         ["xclip", "-selection", "clipboard"])
-
-    def test_no_clipboard_is_not_an_error(self):
-        self.assertIsNone(ag.clipboard_argv(which=lambda e: None))
-        self.assertFalse(ag.copy_to_clipboard("x", which=lambda e: None))
+# Clipboard behaviour is covered by tests/test_clipboard.py against the shared helper.
 
 
 class TabLauncherTests(unittest.TestCase):
@@ -85,22 +79,47 @@ class TabLauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             spaced = os.path.join(tmp, "my project")
             os.mkdir(spaced)
-            cmd = ag.resume_command("abc-123", spaced, source="cc")
+            cmd = ag.resume_command(spaced, ["claude", "--resume", "abc-123"])
             self.assertIn(shlex.quote(spaced), cmd)          # quoted once for the shell
             argv = ag.tab_launcher(cmd, env={"AGSEARCH_TERMINAL_CMD": "t {cmd}"})
             self.assertEqual(argv[:2], ["sh", "-c"])
             self.assertIn("claude --resume abc-123", argv[2])
 
 
-class ResumeCommandTests(unittest.TestCase):
+class ResumeLineTests(unittest.TestCase):
+    """ctrl-t and the transcript reader must reattach the same way Enter does.
+
+    resume_line goes through resume_plan, so they inherit the launch-dir fix: resuming from
+    the cwd recorded on a message lands in the wrong Claude project for 15% of sessions.
+    """
+
+    def _index(self, entries):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(entries, fh)
+        ag.INDEX_PATH = path
+
     def test_codex_sessions_get_the_codex_command(self):
-        self.assertIn("codex resume abc", ag.resume_command("abc", "/tmp", source="codex"))
-        self.assertIn("claude --resume abc", ag.resume_command("abc", "/tmp", source="cc"))
+        self._index({"abc": {"source": "codex", "path": "/x/rollout.jsonl"}})
+        self.assertIn("codex resume abc", ag.resume_line("abc", tempfile.gettempdir()))
+
+    def test_claude_sessions_get_the_claude_command(self):
+        self._index({"abc": {"source": "cc", "path": "/x/abc.jsonl"}})
+        self.assertIn("claude --resume abc", ag.resume_line("abc", tempfile.gettempdir()))
+
+    def test_it_reattaches_from_the_launch_dir_not_the_recorded_subdir(self):
+        with tempfile.TemporaryDirectory() as launch:
+            sub = os.path.join(launch, "packages", "api")
+            os.makedirs(sub)
+            slug = re.sub(r"[^A-Za-z0-9]", "-", launch)
+            self._index({"abc": {"source": "cc", "path": f"/fake/projects/{slug}/abc.jsonl"}})
+            self.assertIn(shlex.quote(launch), ag.resume_line("abc", sub))
 
     def test_dead_directory_falls_back_instead_of_producing_a_broken_cd(self):
-        cmd = ag.resume_command("abc", "/tmp/definitely/not/here", source="cc")
+        self._index({"abc": {"source": "cc", "path": "/x/abc.jsonl"}})
+        cmd = ag.resume_line("abc", "/tmp/definitely/not/here")
         target = cmd.split(" && ")[0][len("cd "):]
-        self.assertTrue(os.path.isdir(target.strip("'")), cmd)
+        self.assertTrue(os.path.isdir(target.strip("\'")), cmd)
 
 
 class TuiStateTests(unittest.TestCase):

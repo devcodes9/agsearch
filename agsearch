@@ -46,7 +46,7 @@ SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subag
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
 TUI_STATE_PATH = os.path.join(CACHE_DIR, "tui-state.json")  # live filter toggles for the fzf session
 
-CACHE_FMT = 4   # bump when the TSV column layout / keying changes, to invalidate old fragments
+CACHE_FMT = 6   # bump when the TSV column layout / keying changes, to invalidate old fragments
 
 # TSV columns (tab-separated, one row per message):
 #   0 session_id  1 cwd  2 gitBranch  3 iso_date  4 role  5 seq  6 title  7 text
@@ -69,6 +69,13 @@ BM25_B = 0.65
 W_TITLE = 2.0
 W_FIRST = 2.5
 W_BODY = 1.0
+# How much of each message is searchable. _single_line defaults to 400, which is right for a
+# preview line and wrong for an index: 41% of messages are longer than that, and capping there
+# left only 19% of transcript text searchable at all. A table or a summary a few hundred
+# characters into a reply was simply absent from the index, so no amount of ranking could
+# surface it. 4,000 recovers that; 20,000 measured no better and costs more to scan.
+MSG_INDEX_CHARS = 4_000
+
 RECENCY_HALFLIFE_DAYS = 45.0
 RECENCY_W = 0.35          # max multiplier bump for a session from today
 USAGE_W = 0.30            # max multiplier bump for a session you resume often
@@ -104,7 +111,7 @@ def _flag(v):
     return str(v).lower() in ("1", "true")
 
 
-def parse_session(path, include_thinking=False, limit=400):
+def parse_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
     """Parse one .jsonl file into ordered index rows (8-field lists, seq assigned).
 
     Rows are keyed by each entry's `sessionId` field, not the filename. For normal sessions
@@ -187,7 +194,7 @@ def _codex_title(user_texts):
     return ""
 
 
-def parse_codex_session(path, include_thinking=False, limit=400):
+def parse_codex_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
     """Parse an OpenAI Codex CLI rollout file into the same 8-field row schema as Claude.
 
     Session id/cwd come from the `session_meta` entry; messages are `response_item` entries of
@@ -554,7 +561,7 @@ def _snippet(text, terms, width=200):
     return _highlight(frag, live)
 
 
-def load_session_rows(sid, thinking=False, limit=400):
+def load_session_rows(sid, thinking=False, limit=MSG_INDEX_CHARS):
     """(source, [(row, is_subagent)]) for one session, chronological.
 
     Shared by the preview card and the full-transcript reader so both see exactly the same
@@ -605,6 +612,18 @@ def _card_header(rows, tagged, source):
     print("\033[2m" + " · ".join(bits) + "\033[0m")
 
 
+def best_matching(texts, keys):
+    """Indices of the messages containing the most query words, and how many that was.
+
+    An exact AND when some message has them all, otherwise the closest ones. A blank card on
+    the result you were just told is the best match reads as a broken search, and the session
+    may well have been ranked there on its title or first prompt.
+    """
+    counts = [sum(1 for k in keys if _at_word_start(t.lower(), k)) for t in texts]
+    best = max(counts, default=0)
+    return [i for i, n in enumerate(counts) if n and n == best], best
+
+
 def render_preview(sid, thinking, query):
     """Compact preview card for one session (no full transcript — that's ctrl-o / resume).
 
@@ -627,25 +646,45 @@ def render_preview(sid, thinking, query):
     keys = query_keys(parse_query(query)) if query.strip() else []
     _card_header(rows, tagged, source)
 
-    if keys:
-        # Same keys as rank_sessions, AND-matched on message text only (not title/typo).
-        matches = [(r, sub) for r, sub in tagged if all(k in r[7].lower() for k in keys)]
-        print(f"\n\033[1;33m● {len(matches)} match(es)\033[0m")
-        for r, sub in matches[:6]:
-            tag = "\033[35m⤷\033[0m" if sub else " "
-            print(f"{tag}{_label(r[4])} {_snippet(r[7], keys, 200)}")
-        if len(matches) > 6:
-            print(f"  \033[2m… {len(matches) - 6} more — ctrl-o reads the whole thing\033[0m")
-    else:
-        # No query yet: just the bookends so you know what the session was about.
+    def bookends():
+        """What the session was about, for when there is nothing better to show."""
         first_user = next((r for r, _ in tagged if r[4] == "user"), None)
         if first_user:
             print(f"\n\033[2mopened with\033[0m  {_snippet(first_user[7], [], 220)}")
         print(f"\033[2mlast\033[0m  {_label(rows[-1][4])} {_snippet(rows[-1][7], [], 220)}")
 
+    if keys:
+        # Same keys AND the same word-start rule as rank_sessions, matched on message text
+        # only (not title/typo). Substring matching here would count `pr` inside `approach`
+        # and report matches the ranker never saw.
+        picked, best = best_matching([r[7] for r, _sub in tagged], keys)
+        matches = [tagged[i] for i in picked]
+
+        if best == len(keys):
+            head = f"● {len(matches)} match(es)"
+        elif best:
+            # No single message has every word, but this session was still ranked here for a
+            # reason. Showing the closest lines beats a blank card that reads as "your best
+            # result contains nothing you searched for".
+            head = f"● {len(matches)} partial · best message has {best} of {len(keys)} words"
+        else:
+            head = "● matched on title or first prompt, not in any message"
+        print(f"\n\033[1;33m{head}\033[0m")
+
+        for r, sub in matches[:6]:
+            tag = "\033[35m⤷\033[0m" if sub else " "
+            print(f"{tag}{_label(r[4])} {_snippet(r[7], keys, 200)}")
+        if len(matches) > 6:
+            print(f"  \033[2m… {len(matches) - 6} more — ctrl-o reads the whole thing\033[0m")
+        if not matches:
+            bookends()
+    else:
+        # No query yet: just the bookends so you know what the session was about.
+        bookends()
+
     # What Enter is actually about to run. Resume relocates when the recorded dir is gone, and
     # that surprise belongs in the preview, not in the scrollback after the CLI has taken over.
-    print(f"\n\033[2m⏎  {resume_command(sid, rows[0][1], source)}\033[0m")
+    print(f"\n\033[2m⏎  {resume_line(sid, rows[0][1])}\033[0m")
 
 
 def render_transcript(sid, thinking=False, query=""):
@@ -664,7 +703,7 @@ def render_transcript(sid, thinking=False, query=""):
     rows = [r for r, _ in tagged]
     keys = query_keys(parse_query(query)) if query.strip() else []
     _card_header(rows, tagged, source)
-    print(f"\033[2m{resume_command(sid, rows[0][1], source)}\033[0m\n")
+    print(f"\033[2m{resume_line(sid, rows[0][1])}\033[0m\n")
     for r, sub in tagged:
         text = clean_snippet(r[7])
         hit = bool(keys) and all(k in r[7].lower() for k in keys)
@@ -675,35 +714,6 @@ def render_transcript(sid, thinking=False, query=""):
 
 
 # ------------------------------------------------------------------ clipboard
-
-# Tried in order; the first one present on PATH wins. macOS first because that's where the
-# ⌘F handoff matters most, then Wayland, then the two X11 standards.
-CLIPBOARDS = [("pbcopy", ["pbcopy"]),
-              ("wl-copy", ["wl-copy"]),
-              ("xclip", ["xclip", "-selection", "clipboard"]),
-              ("xsel", ["xsel", "--clipboard", "--input"])]
-
-
-def clipboard_argv(which=None):
-    """argv of the first available clipboard tool, or None if the box has none."""
-    which = which or shutil.which
-    for exe, argv in CLIPBOARDS:
-        if which(exe):
-            return argv
-    return None
-
-
-def copy_to_clipboard(text, which=None):
-    """Best-effort copy. Returns True if some clipboard tool accepted the text."""
-    argv = clipboard_argv(which)
-    if not argv:
-        return False
-    try:
-        subprocess.run(argv, input=text, text=True, check=False)
-        return True
-    except OSError:
-        return False
-
 
 # ------------------------------------------------------------------ terminal integration
 
@@ -816,20 +826,6 @@ def open_in_tab(inner):
         return False
 
 
-def resume_command(sid, cwd, source="cc"):
-    """The shell one-liner that reattaches this session, safe to paste anywhere."""
-    target = cwd if (cwd and os.path.isdir(cwd)) else _nearest_existing_dir(cwd)
-    bin_argv = ["codex", "resume", sid] if source == "codex" else ["claude", "--resume", sid]
-    return "cd {} && {}".format(shlex.quote(target or HOME), " ".join(bin_argv))
-
-
-def _source_of(sid):
-    try:
-        return json.load(open(INDEX_PATH)).get(sid, {}).get("source", "cc")
-    except (OSError, json.JSONDecodeError):
-        return "cc"
-
-
 # ------------------------------------------------------------------ resume
 
 def _die(msg):
@@ -840,6 +836,30 @@ def _die(msg):
     except (EOFError, KeyboardInterrupt):
         pass
     sys.exit(1)
+
+
+def _launch_dir(session_path, cwd):
+    """The directory Claude actually filed this session under, or "" if undetermined.
+
+    Claude scopes `--resume <id>` by the directory it was launched from, storing the transcript
+    in ~/.claude/projects/<slug>/ where slug = the launch dir with non-alphanumerics replaced by
+    `-`. The `cwd` recorded on messages can be a SUBDIRECTORY of that launch dir, and resuming
+    from the subdirectory makes Claude look in the wrong project ("No conversation found").
+    Slugs can't be decoded back to a path unambiguously (real dashes are indistinguishable from
+    separators), so walk cwd's ancestors and take the one whose slug matches.
+    """
+    if not session_path or not cwd:
+        return ""
+    slug = os.path.basename(os.path.dirname(session_path))
+    d = os.path.abspath(os.path.expanduser(cwd))
+    while d and d != os.sep:
+        if re.sub(r"[^A-Za-z0-9]", "-", d) == slug:
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return ""
 
 
 def _nearest_existing_dir(path):
@@ -878,21 +898,84 @@ def _confirm_active(sid, bin_):
     return ok
 
 
-def resume(sid, cwd, query="", active=False):
-    if query:
-        copy_to_clipboard(query)                    # stash query so ⌘F finds it in-session
-    source = _source_of(sid)
+def resume_plan(sid, cwd):
+    """Where to resume from and what to run: (source, bin, argv, cwd, target, cwd_exists).
+
+    Shared by the launcher and by `--no-resume`, so the command printed for you to run by hand
+    can never drift from the one agsearch would have run itself.
+    """
+    try:
+        with open(INDEX_PATH) as fh:
+            info = json.load(fh).get(sid, {})
+    except (OSError, json.JSONDecodeError):
+        info = {}
+    source = info.get("source", "cc")
     bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
         else ("claude", ["claude", "--resume", sid])
+
+    # Claude looks for the session in the project of whatever directory it starts in, so resume
+    # from the dir it was launched in — not the `cwd` on the messages, which may be a subdir.
+    if source != "codex":
+        cwd = _launch_dir(info.get("path", ""), cwd) or cwd
 
     # The recorded worktree may be long gone. Resume is id-based, so relocate to the nearest
     # surviving ancestor (or $HOME) instead of refusing to launch.
     cwd_exists = bool(cwd) and os.path.isdir(cwd)
     target = cwd if cwd_exists else (_nearest_existing_dir(cwd) if cwd else "")
+    return source, bin_, argv, cwd, target, cwd_exists
+
+
+def resume_command(target, argv):
+    """A shell line you can paste. Worktree paths contain spaces often enough to quote."""
+    cmd = " ".join(argv)
+    return f"cd {shlex.quote(target)} && {cmd}" if target else cmd
+
+
+def resume_line(sid, cwd):
+    """The paste-ready reattach line for one session id.
+
+    Goes through resume_plan so the transcript reader and the new-tab launcher land in the
+    directory Claude actually filed the session under. Resuming from the recorded cwd instead
+    fails for 15% of Claude sessions, because that cwd is often a subdirectory of the one the
+    session was launched from.
+    """
+    _source, _bin, argv, cwd, target, _exists = resume_plan(sid, cwd)
+    return resume_command(target or cwd, argv)
+
+
+# Clipboard tools in preference order: macOS, then Wayland, then the two common X11 ones.
+CLIPBOARD_CMDS = (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"],
+                  ["xsel", "--clipboard", "--input"])
+
+
+def copy_to_clipboard(text, which=None, run=None):
+    """Put `text` on the clipboard with whatever tool exists. Returns the tool used, or "".
+
+    Best effort on purpose: the copy is a convenience (⌘F/^F straight to your query inside the
+    resumed session), so a machine with no clipboard tool should resume normally rather than
+    fail. Injectable which/run so the fallback order is testable without installing anything.
+    """
+    which = which or shutil.which
+    run = run or subprocess.run
+    for cmd in CLIPBOARD_CMDS:
+        if not which(cmd[0]):
+            continue
+        try:
+            run(cmd, input=text, text=True, check=False)
+            return cmd[0]
+        except OSError:
+            continue
+    return ""
+
+
+def resume(sid, cwd, query="", active=False):
+    if query:
+        copy_to_clipboard(query)                    # so ⌘F finds it inside the resumed session
+    source, bin_, argv, cwd, target, cwd_exists = resume_plan(sid, cwd)
 
     # Leave a trace: if the launched CLI dies instantly the popup window vanishes with it,
     # so this log is the only way to see what was attempted.
-    note = f"cd {target or cwd} && {' '.join(argv)}"
+    note = resume_command(target or cwd, argv)
     try:
         with open(os.path.join(CACHE_DIR, "last-resume.log"), "a") as fh:
             fh.write(f"{note}   [source={source} cwd_exists={cwd_exists}"
@@ -960,7 +1043,9 @@ def build_sessions(lines):
         title = _single_line(s["title"] or "(untitled)", 90)
         first = _single_line(s["first_user"], 400)
         # High cap so full sessions (incl. folded-in subagent content) stay searchable.
-        blob = _single_line(" · ".join(s["texts"]), 2_000_000)
+        # Stored lowercased: ranking is the only reader, and it would otherwise re-lower the
+        # whole corpus on every keystroke. Nothing displays this column.
+        blob = _single_line(" · ".join(s["texts"]), 2_000_000).lower()
         out.append(SEP.join([s["sid"], s["cwd"], s["date"][:10], source, s["kind"],
                              title, first, blob]))
     with open(SESSIONS_PATH, "w") as fh:
@@ -1139,6 +1224,44 @@ def _boost(f, usage, now):
     return 1.0 + RECENCY_W * recency + USAGE_W * min(1.0, math.log1p(used) / math.log(6))
 
 
+def _is_word_char(c):
+    return c.isalnum() or c == "_"
+
+
+def _at_word_start(hay, key, whole=False):
+    """Does `key` occur at the start of a word in `hay`? With `whole`, as a complete word.
+
+    str.find is C-fast and this returns on the first real hit, so it stays cheap on a huge
+    transcript. Prefix matching exists to undo stemming (migrat -> migration/migrate), so it
+    is applied only to keys that were actually stemmed. An unstemmed key is the whole word you
+    typed: `pr` should not match `print`, `previously` or `prisma`.
+    """
+    n = len(key)
+    i = hay.find(key)
+    while i != -1:
+        if i == 0 or not _is_word_char(hay[i - 1]):
+            end = i + n
+            if not whole or end >= len(hay) or not _is_word_char(hay[end]):
+                return True
+        i = hay.find(key, i + 1)
+    return False
+
+
+def _key_probe(key, whole=False):
+    """Term frequency of `key`, but zero unless it appears at a word start somewhere.
+
+    Plain `str.count` counts substrings, and that is what poisons ranking: `pr` is a substring
+    of 700/718 sessions but a word in 182, so its idf collapses to nothing and the coverage
+    tiebreaker stops discriminating. Presence is the part that has to be exact; the count
+    itself can stay a substring count because BM25 saturates tf anyway.
+    """
+    def probe(hay):
+        if not _at_word_start(hay, key, whole):
+            return 0
+        return hay.count(key)
+    return probe
+
+
 def query_keys(qterms):
     """Ranking/preview keys: stem when it is long enough, else the raw term."""
     return [stem if len(stem) >= 3 else term for term, stem in qterms]
@@ -1158,17 +1281,19 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     keys = query_keys(qterms)
 
     # Pass 1: per-field term frequencies, plus document frequency per term for idf.
+    # A key equal to the word typed was never stemmed, so match it whole.
+    probes = [_key_probe(k, whole=(k == t)) for (t, _st), k in zip(qterms, keys)]
     data = []
     df = dict.fromkeys(keys, 0)
     for f in rows:
         title_hay = (f[C_TITLE] + " " + short_proj(f[C_CWD])).lower()
         first_hay = f[C_FIRST].lower()
-        body_hay = f[C_BLOB].lower()
+        body_hay = f[C_BLOB]                     # already lowercased at index time
         rec = []
-        for key in keys:
-            tf = body_hay.count(key)
-            tf_first = first_hay.count(key)
-            it = key in title_hay
+        for key, probe in zip(keys, probes):
+            tf = probe(body_hay)
+            tf_first = probe(first_hay)
+            it = probe(title_hay) > 0
             if tf or tf_first or it:
                 df[key] += 1
             rec.append((tf, tf_first, it))
@@ -1178,15 +1303,21 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     avg_first = sum(len(d[2]) for d in data) / len(data) if data else 1
     # Standard BM25 idf, shifted to stay positive even for terms in most documents.
     idf = {k: math.log(1 + (n - df[k] + 0.5) / (df[k] + 0.5)) for k in df}
-    typo = {k for k in df if df[k] <= 2}            # word barely exists → probably a typo, fuzzy it
+    # Barely-there word → probably a typo, so fall back to subsequence matching. Only for words
+    # long enough that an in-order subsequence is evidence of anything: `p...r` within six
+    # characters is satisfied by almost any English text, so short terms would fuzzy-match
+    # every session they are genuinely absent from.
+    typo = {k for k in df if df[k] <= 2 and len(k) >= 5}
 
     scored = []
     for f, title_hay, first_hay, body_hay, rec in data:
         score = 0.0
-        matched = 0
+        matched = 0        # concepts covered, including typo-resolved ones — this is the badge
+        strong = 0         # concepts the session actually contains — this is what ranks
         for (term, _stem_unused), key, (tf, tf_first, it) in zip(qterms, keys, rec):
             if tf or tf_first or it:
                 matched += 1
+                strong += 1
                 score += idf[key] * (W_TITLE * it
                                      + W_FIRST * _bm25_tf(tf_first, len(first_hay), avg_first)
                                      + W_BODY * _bm25_tf(tf, len(body_hay), avg_body))
@@ -1200,11 +1331,18 @@ def rank_sessions(rows, qterms, usage=None, now=None):
                         matched += 1
                         score += 0.3
         if matched:
-            scored.append((score * _boost(f, usage, now), matched, f))
-    # Categorise first: your own sessions always outrank plugin/SDK-spawned runs. Then
-    # coverage (matched all your words), then relevance. Automation is demoted, never hidden.
-    scored.sort(key=lambda x: (x[2][C_KIND] == "auto", -x[1], -x[0]))
-    return scored
+            scored.append((score * _boost(f, usage, now), matched, strong, f))
+    # Categorise first: your own sessions always outrank plugin/SDK-spawned runs. Then coverage,
+    # counting only words the session really contains, then relevance. Automation is demoted,
+    # never hidden.
+    #
+    # Coverage deliberately ignores typo-resolved terms. A subsequence hit is a guess, and
+    # letting a guess count toward coverage let a session that merely contains `b i l l i n g`
+    # spread across a sentence outrank one genuinely about billing at three times the score.
+    # The guess still raises `score`, so a good fuzzy match can win on relevance; it just
+    # cannot win on breadth.
+    scored.sort(key=lambda x: (x[3][C_KIND] == "auto", -x[2], -x[0]))
+    return [(sc, m, f) for sc, m, _st, f in scored]
 
 
 def _smart_rows(rows, qterms, live=frozenset(), usage=None, gone=frozenset(), sort="smart"):
@@ -1455,7 +1593,8 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False, here=Fal
     if not sid or sid == NO_SID:         # the "no sessions match" placeholder row
         return 0
     if no_resume:
-        print(resume_command(sid, cwd, _source_of(sid)))
+        _source, _bin, argv, _cwd, target, _exists = resume_plan(sid, cwd)
+        print(resume_command(target or cwd, argv))
         return 0
     resume(sid, cwd, typed, active=active)
     return 0
@@ -1490,7 +1629,7 @@ def _internal(argv):
         sid = argv[1] if len(argv) > 1 else ""
         cwd = argv[2] if len(argv) > 2 else ""
         if sid and sid != NO_SID:
-            copy_to_clipboard(resume_command(sid, cwd, _source_of(sid)))
+            copy_to_clipboard(resume_line(sid, cwd))
         return 0
     if cmd == "_tab":
         sid = argv[1] if len(argv) > 1 else ""
@@ -1500,7 +1639,7 @@ def _internal(argv):
             return 0
         if query:
             copy_to_clipboard(query)
-        if not open_in_tab(resume_command(sid, cwd, _source_of(sid))):
+        if not open_in_tab(resume_line(sid, cwd)):
             print("no scriptable terminal found for a new tab — set AGSEARCH_TERMINAL_CMD",
                   file=sys.stderr)
             return 1
