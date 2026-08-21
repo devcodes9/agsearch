@@ -1,13 +1,5 @@
 # TODOs
 
-## Preview card for title, first-prompt, and typo #1s
-
-- **What:** After stem-on-body preview ships, show matches when ranker won via title, first prompt, or `_fuzzy_span`, so `0 match(es)` cannot happen on a #1 row.
-- **Why:** This cut only AND-matches ranking keys on message text.
-- **Pros:** Preview equals rank.
-- **Cons:** Second matching path inside `render_preview`.
-- **Context:** `render_preview` (`agsearch:566-577`) currently uses raw `query.split()` on body; this cut switches to `parse_query` keys on body only.
-- **Depends on / blocked by:** Stem-on-body preview PR. Frozen gold snapshot so you can list leftover 0-match queries.
 
 ## Short/numeric queries like `PR 1144` still rank ~128
 
