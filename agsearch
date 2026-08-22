@@ -1041,7 +1041,7 @@ def build_sessions(lines):
         fh.write("\n".join(out))
 
 
-# Common words that add noise, not signal, to a search ("migration OF alibrary").
+# Common words that add noise, not signal, to a search ("migration OF the database").
 _STOP = {"of", "the", "a", "an", "to", "for", "in", "on", "and", "or", "is", "it", "this",
          "that", "with", "from", "by", "at", "as", "be", "are", "was", "were", "how", "do",
          "i", "my", "me", "we", "you", "about", "into", "using", "use", "some", "any"}
@@ -1219,7 +1219,7 @@ def rank_sessions(rows, qterms, usage=None, now=None):
     length normalization, so a sprawling session no longer outranks a short exact match, and
     what a session was *opened to do* outweighs a passing mention buried in it. The result is
     then nudged by recency and how often you've resumed that session. A term that exists almost
-    nowhere as text (a typo like 'alibrry') falls back to subsequence matching.
+    nowhere as text (a typo like 'conection') falls back to subsequence matching.
     """
     usage = usage or {}
     n = len(rows) or 1

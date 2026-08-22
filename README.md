@@ -15,7 +15,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
 </p>
 
-<!-- Demo GIF goes here once recorded: `brew install vhs && vhs docs/demo.tape` -->
+<p align="center">
+  <img src="https://raw.githubusercontent.com/devcodes9/agsearch/main/docs/demo.gif"
+       alt="Typing a misspelled half-remembered phrase; the session you meant is row one"
+       width="100%">
+</p>
 
 ## Why not just `/resume`?
 
@@ -168,7 +172,7 @@ opened the session *asking for*, so it's weighted hardest; **length normalizatio
 sprawling transcript that mentions your term once no longer outranks a short, on-point session.
 Near-ties are then nudged by **recency** and by how often you've actually resumed that session
 (read off agsearch's own resume log). Badge `N/T` = query terms matched. A word that barely exists
-anywhere (a typo like `alibrry`) falls back to subsequence matching. No modes or flags.
+anywhere (a typo like `conection`) falls back to subsequence matching. No modes or flags.
 
 **Honest limit:** this is lexical, not semantic. Ranking beats an unordered `rg` dump, but it
 is not a guarantee that row one is the session you meant. Because transcripts are large,
