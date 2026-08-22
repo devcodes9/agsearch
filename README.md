@@ -70,18 +70,10 @@ uv tool install agsearch
 pipx install agsearch
 ```
 
-These do not bring `fzf`, which the interactive interface needs:
-
-```sh
-sudo apt install fzf      # Debian, Ubuntu
-sudo dnf install fzf      # Fedora
-sudo pacman -S fzf        # Arch
-brew install fzf          # macOS, Linuxbrew
-```
-
-No sudo? `git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf && ~/.fzf/install`.
-
-Without fzf, `agsearch -n "query"` still prints ranked matches.
+The interactive interface needs [`fzf`](https://github.com/junegunn/fzf#installation) **0.35 or
+newer** — that is the release which added the `start` event agsearch binds. Some distributions
+package an older one; `fzf`'s own install script is the fallback. Without fzf,
+`agsearch -n "query"` still prints ranked matches.
 
 ### Install script
 

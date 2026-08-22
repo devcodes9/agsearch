@@ -71,23 +71,10 @@ case ":$PATH:" in
      echo "      export PATH=\"$PREFIX:\$PATH\"" ;;
 esac
 
-# Name the command for the machine this is running on. "see the fzf homepage"
-# means going and reading a page; an exact line means running it. Printed, never
-# run: installing system packages needs sudo, and a piped installer that sudos
-# is the reason people distrust piped installers.
 if ! command -v fzf >/dev/null 2>&1; then
-  if   command -v brew    >/dev/null 2>&1; then FZF_HINT="brew install fzf"
-  elif command -v apt-get >/dev/null 2>&1; then FZF_HINT="sudo apt install fzf"
-  elif command -v dnf     >/dev/null 2>&1; then FZF_HINT="sudo dnf install fzf"
-  elif command -v pacman  >/dev/null 2>&1; then FZF_HINT="sudo pacman -S fzf"
-  elif command -v zypper  >/dev/null 2>&1; then FZF_HINT="sudo zypper install fzf"
-  elif command -v apk     >/dev/null 2>&1; then FZF_HINT="sudo apk add fzf"
-  else FZF_HINT=""
-  fi
-  echo "note: fzf is not installed — the interactive interface needs it."
-  [ -n "$FZF_HINT" ] && echo "      $FZF_HINT"
-  echo "      no sudo:  git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf && ~/.fzf/install"
-  echo "      or skip it: agsearch -n \"query\" works without fzf"
+  echo "note: fzf is not installed — the interactive TUI needs it."
+  echo "      fzf 0.35 or newer: https://github.com/junegunn/fzf#installation"
+  echo "      (agsearch -n \"query\" works without fzf)"
 fi
 
 echo "done. run: agsearch"

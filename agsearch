@@ -1331,28 +1331,11 @@ def cmd_filter(argv):
     sys.stdout.write("\n".join(out))
 
 
-def fzf_install_hint():
-    """The command that installs fzf on *this* machine.
-
-    "see the fzf homepage" means going and reading a page. Naming the exact
-    line means running it, and the person most likely to hit this is on Linux,
-    where a hardcoded `brew install fzf` is simply wrong.
-    """
-    for tool, cmd in (("brew", "brew install fzf"),
-                      ("apt-get", "sudo apt install fzf"),
-                      ("dnf", "sudo dnf install fzf"),
-                      ("pacman", "sudo pacman -S fzf"),
-                      ("zypper", "sudo zypper install fzf"),
-                      ("apk", "sudo apk add fzf")):
-        if shutil.which(tool):
-            return cmd
-    return "https://github.com/junegunn/fzf#installation"
-
-
 def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     if not shutil.which("fzf"):
         print("fzf not installed. Falling back to non-interactive output.\n"
-              f"Install with: {fzf_install_hint()}\n", file=sys.stderr)
+              "Install fzf 0.35+: https://github.com/junegunn/fzf#installation\n",
+              file=sys.stderr)
         return print_matches(lines, query)
 
     self = os.path.abspath(__file__)
