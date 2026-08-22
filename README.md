@@ -15,7 +15,16 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
 </p>
 
-<!-- Demo GIF goes here once recorded: `brew install vhs && vhs docs/demo.tape` -->
+<p align="center">
+  <img src="https://raw.githubusercontent.com/devcodes9/agsearch/main/docs/demo.gif"
+       alt="Typing a misspelled half-remembered phrase; the session you meant is row one"
+       width="100%">
+</p>
+
+<p align="center">
+  <sub>52 sessions, and the query is misspelled. Recorded against a synthetic corpus:
+  <code>./docs/record-demo.sh</code></sub>
+</p>
 
 ## Why not just `/resume`?
 

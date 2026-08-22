@@ -1,42 +1,51 @@
 # VHS tape for the README demo GIF.  https://github.com/charmbracelet/vhs
 #
-#   brew install vhs
-#   vhs docs/demo.tape        # writes docs/demo.gif
+#   ./docs/record-demo.sh
 #
-# The tape is committed rather than just the GIF on purpose: re-recording after
-# a UI change is `vhs docs/demo.tape`, not getting the take right again.
+# Recorded against a SYNTHETIC corpus, never a real ~/.claude. The GIF is the
+# most-shared artifact this repo produces, so it must not contain a real
+# transcript. record-demo.sh builds the fixture and points HOME at it.
 #
-# Keep it under ~15 seconds. The demo's whole job is to show that row one is
-# the session you meant — not to tour the flags.
+# The query is deliberately misspelled: "conection pool" is what someone
+# half-remembering a session actually types, and it exercises the subsequence
+# fallback that makes the tagline true.
 
 Output docs/demo.gif
 
-Set Shell "zsh"
-Set FontSize 16
-Set Width 1200
-Set Height 640
+Set Shell "bash"
+Set FontSize 14
+Set Width 1500
+Set Height 500
 Set Padding 20
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 60ms
+Set TypingSpeed 75ms
 
 Hide
-Type "clear" Enter
+Sleep 2s
+Type "source @@ENV@@"
+Enter
+Sleep 800ms
+Type "agsearch -n zzzznomatch >/dev/null 2>&1"
+Enter
+Sleep 2s
+Type "clear"
+Enter
+Sleep 800ms
 Show
 
-Sleep 700ms
+Sleep 900ms
 Type "agsearch"
 Sleep 400ms
 Enter
 
-# Cold list settles, then type the thing you half-remember.
-Sleep 2s
-Type "stripe tax"
+# One row per session, most recent first.
 Sleep 2500ms
 
-# The point of the whole product: the preview pane already shows the matched
-# line, highlighted, before spending a token.
-Sleep 1500ms
+# Type the thing you half-remember, misspelled the way you would type it.
+Type "conection pool"
 
-# Enter resumes — into Claude Code or Codex, whichever the session came from.
-Enter
-Sleep 3s
+# Row one is the session you meant; the pane shows the turn that proves it.
+Sleep 4s
+
+Screenshot docs/demo-still.png
+Sleep 800ms
