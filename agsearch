@@ -1334,7 +1334,8 @@ def cmd_filter(argv):
 def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     if not shutil.which("fzf"):
         print("fzf not installed. Falling back to non-interactive output.\n"
-              "Install with: brew install fzf\n", file=sys.stderr)
+              "Install fzf 0.35+: https://github.com/junegunn/fzf#installation\n",
+              file=sys.stderr)
         return print_matches(lines, query)
 
     self = os.path.abspath(__file__)

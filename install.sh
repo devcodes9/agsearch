@@ -73,7 +73,7 @@ esac
 
 if ! command -v fzf >/dev/null 2>&1; then
   echo "note: fzf is not installed — the interactive TUI needs it."
-  echo "      macOS: brew install fzf   ·   Linux: see https://github.com/junegunn/fzf"
+  echo "      fzf 0.35 or newer: https://github.com/junegunn/fzf#installation"
   echo "      (agsearch -n \"query\" works without fzf)"
 fi
 
