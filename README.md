@@ -19,7 +19,11 @@ agsearch indexes the local transcripts your coding agents already write. Search 
 ranked list, preview the matching lines, and resume the original Claude Code or Codex session.
 Everything stays on your machine.
 
-<!-- Demo GIF goes here once recorded: `brew install vhs && vhs docs/demo.tape` -->
+<p align="center">
+  <img src="https://raw.githubusercontent.com/devcodes9/agsearch/main/docs/demo.gif"
+       alt="Typing a misspelled half-remembered phrase; the session you meant is row one"
+       width="100%">
+</p>
 
 ## Quick start
 
@@ -128,7 +132,8 @@ remember what was said.
 agsearch drops common stopwords, applies conservative stemming, and ranks matching sessions with
 BM25 across three weighted fields: title and project, first prompt, and full transcript. Sessions
 covering more query terms rank first; relevance, recency, and previous resumes break close ties.
-Rare long typos can fall back to subsequence matching.
+Rare long typos fall back to subsequence matching, so `conection pool` still finds the
+session about connection pools.
 
 Search is lexical, not semantic. It will not match concepts expressed with completely different
 words, and the first result is not guaranteed to be the session you intended.
