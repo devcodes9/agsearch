@@ -11,6 +11,28 @@ migration in the same line.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-22
+
+Documentation and messaging. No behaviour change.
+
+### Fixed
+
+- **fzf install advice named Homebrew on Linux.** The installer note and the
+  runtime fallback both said `brew install fzf`, which is wrong on the platform
+  the reader is most likely using. Both now link to fzf's installation page.
+- **The fzf version floor was undocumented.** agsearch binds fzf's `start`
+  event, added in fzf 0.35.0, so anything older fails with `unknown event:
+  start`. Some distributions still package below that.
+
+### Changed
+
+- **The quick start leads with Homebrew**, which also resolves `fzf` so the
+  interactive interface works on first run. `uvx` follows, for running a single
+  search without installing. 0.1.0 led with `uvx`, which fails for anyone
+  without `uv`.
+- **README notes that other agents are addable.** Gemini CLI and opencode are
+  tracked in #40.
+
 ## [0.1.0] - 2026-08-21
 
 The packaging release. agsearch has worked for a while; this is the first
@@ -44,5 +66,6 @@ version you can name, install reproducibly, and report a bug against.
   have no cross-session search" but that they search titles while agsearch
   searches what was said.
 
-[Unreleased]: https://github.com/devcodes9/agsearch/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/devcodes9/agsearch/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/devcodes9/agsearch/releases/tag/v0.1.1
 [0.1.0]: https://github.com/devcodes9/agsearch/releases/tag/v0.1.0
