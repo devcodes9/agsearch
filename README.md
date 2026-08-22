@@ -32,13 +32,26 @@ Three other differences worth knowing:
 - **It sees `-p` / SDK sessions.** Those never appear in the native picker at all. agsearch
   indexes them, dimmed and tagged `auto`.
 
+## Try it without installing anything
+
+```sh
+uvx agsearch -n "stripe tax id"
+```
+
+That searches your real sessions and prints ranked matches. Nothing is installed, nothing is
+left behind. agsearch is stdlib-only, so there is nothing to compile either.
+
 ## Install
 
 ```sh
 brew install devcodes9/tap/agsearch
 ```
 
-Brew is the recommended path because it resolves `fzf` and your PATH in the same step. Otherwise:
+Brew is the recommended path because it resolves `fzf` and your PATH in the same step, and
+`fzf` is what the interactive TUI needs. `uvx` cannot install it, because fzf is not a Python
+package — that is the one thing the zero-install route above cannot give you.
+
+Otherwise:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/devcodes9/agsearch/main/install.sh | sh
