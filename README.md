@@ -1,12 +1,19 @@
-# agsearch
+<h1 align="center">agsearch</h1>
 
-**Find the session by what was *said* in it, then resume it.**
+<p align="center">
+  <strong><code>/resume</code> searches session titles.<br>
+  agsearch searches what was said inside them.</strong>
+</p>
 
-Global search across every **Claude Code** and **OpenAI Codex CLI** session — ranked, from
-anywhere, resuming in whichever tool the session came from.
+<p align="center">
+  Ranked full-text search across every <strong>Claude Code</strong> and
+  <strong>OpenAI Codex</strong> session on your machine.
+</p>
 
-[![ci](https://github.com/devcodes9/agsearch/actions/workflows/ci.yml/badge.svg)](https://github.com/devcodes9/agsearch/actions/workflows/ci.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/devcodes9/agsearch/actions/workflows/ci.yml"><img src="https://github.com/devcodes9/agsearch/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
+</p>
 
 <!-- Demo GIF goes here once recorded: `brew install vhs && vhs docs/demo.tape` -->
 
@@ -163,10 +170,11 @@ Near-ties are then nudged by **recency** and by how often you've actually resume
 (read off agsearch's own resume log). Badge `N/T` = query terms matched. A word that barely exists
 anywhere (a typo like `alibrry`) falls back to subsequence matching. No modes or flags.
 
-**Honest limit:** this is lexical, not semantic. The top hit is reliably right, but because
-transcripts are large, lower-ranked results can share a badge while being only loosely related,
-and it won't match by *meaning* (e.g. `migration` won't find "porting the database"). That needs
-embeddings, a deliberate future step, not more matching heuristics.
+**Honest limit:** this is lexical, not semantic. Ranking beats an unordered `rg` dump, but it
+is not a guarantee that row one is the session you meant. Because transcripts are large,
+lower-ranked results can share a badge while being only loosely related, and it won't match by
+*meaning* (e.g. `migration` won't find "porting the database"). That needs embeddings, a
+deliberate future step, not more matching heuristics.
 
 ## How it works
 
