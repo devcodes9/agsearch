@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # agsearch is dependency-free Python. The matrix exists to hold that
+        # true: macOS is where users are, Linux is what we must not break, and
+        # 3.9 is the oldest interpreter still shipped on a supported macOS.
+        os: [macos-latest, ubuntu-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Byte-compile the CLI
+        run: python3 -m py_compile agsearch
+      - name: Installer is valid POSIX sh
+        run: sh -n install.sh
+
+  install-smoke:
+    # The install path is the product's first UI: exercise it for real rather
+    # than trusting that it still parses.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install from the checkout
+        run: PREFIX="$RUNNER_TEMP/bin" sh install.sh
+      - name: Installed binary reports its version
+        run: |
+          "$RUNNER_TEMP/bin/agsearch" --version
+          "$RUNNER_TEMP/bin/agsearch" --help >/dev/null
+      - name: Search an empty corpus without crashing
+        run: |
+          # No ~/.claude or ~/.codex on a runner: exit 1 with a message is the
+          # contract, a traceback is not.
+          set +e
+          out="$("$RUNNER_TEMP/bin/agsearch" -n "anything" 2>&1)"
+          code=$?
+          set -e
+          echo "$out"
+          [ $code -eq 1 ] || { echo "expected exit 1, got $code"; exit 1; }
+          case "$out" in *Traceback*) echo "crashed"; exit 1 ;; esac

@@ -1,30 +1,69 @@
 #!/bin/sh
-# agsearch installer — drops the CLI on your PATH and checks its dependencies.
+# Install agsearch to ~/.local/bin (or $PREFIX).
 #
 #   curl -fsSL https://raw.githubusercontent.com/devcodes9/agsearch/main/install.sh | sh
 #
-# Override the install location with:  PREFIX=/usr/local/bin sh install.sh
+# Installs the latest tagged release. Override with:
+#   AGSEARCH_VERSION=v0.1.0 sh install.sh    # a specific release
+#   AGSEARCH_VERSION=main   sh install.sh    # unreleased tip, for testing
+#   PREFIX=/usr/local/bin   sh install.sh    # a different install location
 set -eu
 
+REPO="devcodes9/agsearch"
 PREFIX="${PREFIX:-$HOME/.local/bin}"
-RAW="https://raw.githubusercontent.com/devcodes9/agsearch/main/agsearch"
 TARGET="$PREFIX/agsearch"
+MAIN_URL="https://raw.githubusercontent.com/$REPO/main/agsearch"
 
 command -v python3 >/dev/null 2>&1 || {
-  echo "error: python3 is required but not found on PATH." >&2
+  echo "error: python3 is required." >&2
   exit 1
+}
+
+# Download to .tmp and validate before moving into place, so a truncated fetch
+# or a 404 body can never leave a broken agsearch on someone's PATH.
+fetch() {
+  curl -fsSL "$1" -o "$TARGET.tmp" 2>/dev/null || { rm -f "$TARGET.tmp"; return 1; }
+  head -n 1 "$TARGET.tmp" | grep -q '^#!' || { rm -f "$TARGET.tmp"; return 1; }
 }
 
 mkdir -p "$PREFIX"
 
-if [ -f "./agsearch" ]; then
+if [ -f "./agsearch" ] && [ -z "${AGSEARCH_VERSION:-}" ]; then
   install -m 0755 "./agsearch" "$TARGET"        # local checkout
 else
-  curl -fsSL "$RAW" -o "$TARGET"                # remote install
-  chmod 0755 "$TARGET"
+  command -v curl >/dev/null 2>&1 || {
+    echo "error: curl is required to install remotely." >&2
+    exit 1
+  }
+  # /releases/latest/download resolves the newest tag server-side. No API call,
+  # so no 60-request/hour rate limit and no JSON to parse.
+  case "${AGSEARCH_VERSION:-}" in
+    "")     URL="https://github.com/$REPO/releases/latest/download/agsearch" ;;
+    main)   URL="$MAIN_URL" ;;
+    *)      URL="https://github.com/$REPO/releases/download/$AGSEARCH_VERSION/agsearch" ;;
+  esac
+
+  if ! fetch "$URL"; then
+    if [ -n "${AGSEARCH_VERSION:-}" ]; then
+      echo "error: could not download agsearch from $URL" >&2
+      echo "       check the version exists: https://github.com/$REPO/releases" >&2
+      exit 1
+    fi
+    # No tagged release yet. Say so rather than failing the install outright.
+    echo "note: no tagged release found — installing from main." >&2
+    fetch "$MAIN_URL" || {
+      echo "error: could not download agsearch from $MAIN_URL" >&2
+      exit 1
+    }
+  fi
+  chmod 0755 "$TARGET.tmp"
+  mv "$TARGET.tmp" "$TARGET"
 fi
 
-echo "installed: $TARGET"
+# Read the version out of the file rather than running it: a freshly downloaded
+# script should not be executed just to print a label.
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$TARGET" | head -n 1)"
+echo "installed: $TARGET${VERSION:+ (v$VERSION)}"
 
 case ":$PATH:" in
   *":$PREFIX:"*) ;;
