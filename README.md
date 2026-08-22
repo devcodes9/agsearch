@@ -19,11 +19,7 @@ agsearch indexes the local transcripts your coding agents already write. Search 
 ranked list, preview the matching lines, and resume the original Claude Code or Codex session.
 Everything stays on your machine.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/devcodes9/agsearch/main/docs/demo.gif"
-       alt="Typing a misspelled half-remembered phrase; the session you meant is row one"
-       width="100%">
-</p>
+<p align="center"><img src="https://raw.githubusercontent.com/devcodes9/agsearch/main/docs/demo.gif" alt="Searching 52 sessions; the second query is misspelled and still lands on the right one" width="100%"></p>
 
 ## Quick start
 
