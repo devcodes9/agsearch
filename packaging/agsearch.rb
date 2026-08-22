@@ -7,6 +7,8 @@
 #   brew install devcodes9/tap/agsearch
 #
 class Agsearch < Formula
+  include Language::Python::Shebang
+
   desc "Search every Claude Code and Codex CLI session, then resume the right one"
   homepage "https://github.com/devcodes9/agsearch"
   url "https://github.com/devcodes9/agsearch/archive/refs/tags/v0.1.0.tar.gz"
@@ -17,10 +19,20 @@ class Agsearch < Formula
   # The whole reason to ship a formula: brew resolves fzf, so the TUI works
   # immediately instead of failing on first run with a "brew install fzf" note.
   depends_on "fzf"
-  depends_on "python@3.13"
+
+  # agsearch is a single stdlib-only script, so it needs an interpreter, not a
+  # Python environment. `uses_from_macos` takes the system python3 on macOS and
+  # only pulls brew's on Linux. `depends_on "python@3.13"` would drag in seven
+  # packages (openssl, sqlite, readline, xz, ...) for an interpreter the script
+  # never uses. Same shape as the ddgr formula in homebrew-core.
+  uses_from_macos "python"
 
   def install
     bin.install "agsearch"
+    # Every single-file Python formula in core rewrites the shebang. Keeping
+    # PATH resolution (rather than hardcoding a Cellar path) means the script
+    # behaves the same whether brew, the installer or a clone put it there.
+    rewrite_shebang detected_python_shebang(use_python_from_path: true), bin/"agsearch"
   end
 
   test do
@@ -45,7 +57,12 @@ class Agsearch < Formula
       {"type":"assistant","sessionId":"11111111-2222-3333-4444-555555555555","cwd":"/tmp/demo","timestamp":"2026-01-01T00:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The stripe tax id lives in billing/config.py"}]}}
     JSONL
 
-    assert_match version.to_s, shell_output("#{bin}/agsearch --version")
+    # `version` is the git ref on a --HEAD build, while the script always
+    # reports its own literal, so pin the shape always and the value only for
+    # a real release.
+    out = shell_output("#{bin}/agsearch --version").strip
+    assert_match(/\Aagsearch \d+\.\d+\.\d+\z/, out)
+    assert_match version.to_s, out unless build.head?
 
     hits = shell_output("#{bin}/agsearch -n \"stripe tax id\"")
     assert_match "billing/config.py", hits   # the matched line, unhighlighted
