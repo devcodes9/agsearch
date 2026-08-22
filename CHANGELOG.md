@@ -28,6 +28,8 @@ version you can name, install reproducibly, and report a bug against.
   output stays clean.
 - **Homebrew tap** — `brew install devcodes9/tap/agsearch`, which resolves both
   PATH and the `fzf` dependency in one step.
+- **PyPI** — `uvx agsearch -n "query"` runs the tool with nothing installed.
+  Published via Trusted Publishing, so no API token exists in the repo.
 - **CI** across macOS and Linux on Python 3.9 and 3.13, including a smoke test
   that runs the installer end to end.
 
@@ -41,16 +43,6 @@ version you can name, install reproducibly, and report a bug against.
   `codex resume` now search session *metadata*, so the claim is no longer "they
   have no cross-session search" but that they search titles while agsearch
   searches what was said.
-
-### Known limits
-
-- Search is lexical, not semantic: `migration` will not find "porting the
-  database". Embeddings are a deliberate future step.
-- Claude Code deletes transcripts after 30 days by default
-  (`cleanupPeriodDays`). agsearch can only find what is still on disk — see the
-  README for how to change it.
-- The JSONL schema is Claude Code's internal format and can change between
-  releases. Run `agsearch --reindex` after an upgrade if results look wrong.
 
 [Unreleased]: https://github.com/devcodes9/agsearch/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/devcodes9/agsearch/releases/tag/v0.1.0

@@ -1,56 +1,78 @@
 # agsearch
 
-Global search across every **Claude Code** and **OpenAI Codex CLI** session, then resume the
-one you want, in whichever tool it came from.
+**Find the session by what was *said* in it, then resume it.**
 
-Each agent stores sessions as local JSONL (Claude under `~/.claude/projects/`, Codex under
-`~/.codex/sessions/`) but neither has cross-session search. `agsearch` indexes them all into one
-smart-ranked search, previews the matching lines, and drops you back in with `claude --resume`
-or `codex resume` as appropriate. Rows are tagged `cc` (Claude) or `cx` (Codex). A source-adapter
-layer means new agents (Cursor, Gemini, …) are just another parser.
+Global search across every **Claude Code** and **OpenAI Codex CLI** session — ranked, from
+anywhere, resuming in whichever tool the session came from.
 
-No Elasticsearch needed: it's ripgrep-speed over local JSONL with a per-file cache. Cold build
-over ~1,200 sessions is a few seconds; every warm search after that is ~0.1s.
+[![ci](https://github.com/devcodes9/agsearch/actions/workflows/ci.yml/badge.svg)](https://github.com/devcodes9/agsearch/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Runs fully local.** Your sessions are indexed and searched on your machine — nothing is
-uploaded, and agsearch makes no network calls at all. It reads the JSONL your agent CLIs already
-wrote, caches the index under `~/.cache/agsearch/`, and the only programs it ever shells out to
-are `fzf`, a clipboard tool (`pbcopy`, `wl-copy`, `xclip` or `xsel`, whichever you have), and
-the `claude`/`codex` CLI you asked it to resume.
+<!-- Demo GIF goes here once recorded: `brew install vhs && vhs docs/demo.tape` -->
+
+## Why not just `/resume`?
+
+Claude Code's `/resume` picker and `codex resume` both got good recently — `/resume` searches
+across every project on the machine, filters by branch and worktree, and previews. If you
+remember roughly what a session was *called*, use them. They're free and already installed.
+
+Read what they match on, though. Claude matches "the session name if you set one, otherwise the
+AI-generated title, conversation summary, or first prompt." Codex matches name, preview, thread
+id, branch, cwd. **Both search metadata about the session. Neither searches inside the
+conversation.**
+
+> Native search finds sessions by what they were **called**.
+> agsearch finds them by what was **said** in them — ranked, across Claude and Codex.
+
+Three other differences worth knowing:
+
+- **Cross-tool.** One ranked list over Claude *and* Codex. Rows tagged `cc` / `cx`.
+- **It actually resumes.** Picking a session from an unrelated project in the native picker
+  copies a `cd`+resume command to your clipboard. agsearch resumes it.
+- **It sees `-p` / SDK sessions.** Those never appear in the native picker at all. agsearch
+  indexes them, dimmed and tagged `auto`.
+
+## Try it without installing anything
+
+```sh
+uvx agsearch -n "stripe tax id"
+```
+
+That searches your real sessions and prints ranked matches. Nothing is installed, nothing is
+left behind. agsearch is stdlib-only, so there is nothing to compile either.
 
 ## Install
 
-One line (installs to `~/.local/bin`, override with `PREFIX=`):
+```sh
+brew install devcodes9/tap/agsearch
+```
+
+Brew is the recommended path because it resolves `fzf` and your PATH in the same step, and
+`fzf` is what the interactive TUI needs. `uvx` cannot install it, because fzf is not a Python
+package — that is the one thing the zero-install route above cannot give you.
+
+Otherwise:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/devcodes9/agsearch/main/install.sh | sh
 ```
 
-Or from a clone:
+Installs the latest release to `~/.local/bin`. Override with `PREFIX=` or pin with
+`AGSEARCH_VERSION=v0.1.0`.
 
-```sh
-git clone https://github.com/devcodes9/agsearch && cd agsearch && ./install.sh
-```
+Requirements: **Python 3**, no packages. **[`fzf`](https://github.com/junegunn/fzf)** for the
+interactive TUI — `agsearch -n "query"` works without it.
 
-Requirements: **Python 3** (no packages needed) and **[`fzf`](https://github.com/junegunn/fzf)**
-for the interactive TUI (`brew install fzf`). The non-interactive mode (`agsearch -n "query"`)
-works without fzf.
-
-### Optional: global hotkey
-
-Bind it to a system-wide shortcut so search is always one keypress away. With
-[Hammerspoon](https://www.hammerspoon.org), this pops a floating terminal that *becomes* your
-resumed session on Enter:
-
-```lua
-hs.hotkey.bind({ "ctrl", "cmd" }, "k", function()
-  hs.osascript.applescript([[
-    tell application "iTerm"
-      activate
-      create window with default profile command "/bin/zsh -lic \"exec agsearch\""
-    end tell]])
-end)
-```
+> [!IMPORTANT]
+> **Claude Code deletes transcripts after 30 days by default.** agsearch can only find what is
+> still on disk, and the default `cleanupPeriodDays: 30` means your history is quietly
+> evaporating right now. If you want a searchable archive, raise it in `~/.claude/settings.json`:
+>
+> ```json
+> { "cleanupPeriodDays": 365 }
+> ```
+>
+> This is your setting to change — agsearch never writes to it.
 
 ## Use
 
@@ -63,7 +85,32 @@ agsearch --here "..."        # only sessions from the current directory's projec
 agsearch --project myapp     # only sessions whose path contains 'myapp'
 agsearch --thinking          # also search assistant thinking blocks
 agsearch --reindex           # force a full cache rebuild
+agsearch --version           # print the installed version
 ```
+
+**Enter** resumes the session (cd's to its project dir, runs `claude --resume`), **Ctrl-/**
+toggles the preview. Add `--no-resume` to print the resume command instead.
+
+Search is **exact substring, AND-of-terms** by default (`stripe webhook` = both words). Operators
+work in either mode: `'word` force-exact, `^prefix`, `suffix$`, `!exclude`, `a | b` for OR. Pass
+`--fuzzy` for typo-tolerant matching.
+
+[Optional: bind it to a global hotkey](docs/hotkey.md) — Raycast, Hammerspoon or skhd. Not
+required; if you're running `claude` you're already at a prompt.
+
+## Runs fully local
+
+Your sessions are indexed and searched on your machine — nothing is uploaded, and agsearch makes
+no network calls at all. It reads the JSONL your agent CLIs already wrote, caches the index under
+`~/.cache/agsearch/`, and the only programs it ever shells out to are `fzf`, a clipboard tool
+(`pbcopy`, `wl-copy`, `xclip` or `xsel`, whichever you have), and the `claude`/`codex` CLI you
+asked it to resume.
+
+No Elasticsearch needed: it's ripgrep-speed over local JSONL with a per-file cache. Cold build
+over ~1,200 sessions is a few seconds (it tells you how far along it is); every warm search after
+that is ~0.1s.
+
+## What the results look like
 
 The TUI lists **one clean row per session**: `date · project · N/T · title`, where `N/T` is how many
 of your query terms the session matched. Search runs over the full conversation text (agsearch does
@@ -91,27 +138,6 @@ that spawned them** (linked via the subagent's `sessionId` field). A hit in suba
 and resumes the parent; the preview shows subagent lines tagged `⤷`. So the list stays at ~325
 real sessions while nothing is lost from search.
 
-Search is **BM25 ranked**, not just substring. It drops stopwords, applies a conservative stem so
-`migration`≈`migrate`≈`migrating`, and scores each session over three weighted fields — title +
-project, the session's **first prompt**, and the full transcript. The first prompt is what you
-opened the session *asking for*, so it's weighted hardest; **length normalization** means a
-sprawling transcript that mentions your term once no longer outranks a short, on-point session.
-Near-ties are then nudged by **recency** and by how often you've actually resumed that session
-(read off agsearch's own resume log). Badge `N/T` = query terms matched. A word that barely exists
-anywhere (a typo like `alibrry`) falls back to subsequence matching. No modes or flags.
-
-Honest limit: this is lexical, not semantic. The top hit is reliably right, but because
-transcripts are large, lower-ranked results can share a badge while being only loosely related,
-and it won't match by *meaning* (e.g. `migration` won't find "porting the database"). That needs
-embeddings, a deliberate future step, not more matching heuristics.
-
-Search is **exact substring, AND-of-terms** by default (`stripe webhook` = both words). Operators
-work in either mode: `'word` force-exact, `^prefix`, `suffix$`, `!exclude`, `a | b` for OR. Pass
-`--fuzzy` for typo-tolerant matching.
-
-**Enter** resumes the session (cd's to its project dir, runs `claude --resume`), **Ctrl-/** toggles
-the preview. Add `--no-resume` to print the resume command instead.
-
 Resume is **id-based**, so a session whose project dir has since been deleted (a removed worktree)
 still resumes — agsearch cd's to the nearest surviving ancestor of the dead path (or `$HOME`) and
 prints a one-line notice. Those rows carry a dim `orig dir gone` tag in the list, and the preview
@@ -124,13 +150,35 @@ resumed session. So the highlighted-in-context view lives in the preview pane (b
 any tokens), and as a bonus, Enter copies your query to the clipboard: once the session reopens,
 press **⌘F → ⌘V → Enter** to jump to the match in whatever iTerm holds in scrollback.
 
+## How ranking works
+
+Search is **BM25 ranked**, not just substring. It drops stopwords, applies a conservative stem so
+`migration`≈`migrate`≈`migrating`, and scores each session over three weighted fields — title +
+project, the session's **first prompt**, and the full transcript. The first prompt is what you
+opened the session *asking for*, so it's weighted hardest; **length normalization** means a
+sprawling transcript that mentions your term once no longer outranks a short, on-point session.
+Near-ties are then nudged by **recency** and by how often you've actually resumed that session
+(read off agsearch's own resume log). Badge `N/T` = query terms matched. A word that barely exists
+anywhere (a typo like `alibrry`) falls back to subsequence matching. No modes or flags.
+
+**Honest limit:** this is lexical, not semantic. The top hit is reliably right, but because
+transcripts are large, lower-ranked results can share a badge while being only loosely related,
+and it won't match by *meaning* (e.g. `migration` won't find "porting the database"). That needs
+embeddings, a deliberate future step, not more matching heuristics.
+
 ## How it works
 
-- Walks `~/.claude/projects/**/*.jsonl`, extracting user prompts and assistant text (one row
-  per message) plus each session's AI-generated title.
+- Walks `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/*.jsonl`, extracting user
+  prompts and assistant text (one row per message) plus each session's AI-generated title.
+  A source-adapter layer means new agents (Cursor, Gemini, …) are just another parser.
 - Caches parsed output per file, keyed by mtime, under `~/.cache/agsearch/`. Only changed
   sessions are re-parsed on later runs.
 - The JSONL schema is Claude Code's internal format and can change between releases; if a
-  future version breaks parsing, run `agsearch --reindex` after updating the extractor.
+  future version breaks parsing, run `agsearch --reindex` after updating.
 - Ranking is covered by tests over a small fixture corpus (no dependencies, no fixtures on
   disk): `python3 -m unittest discover -s tests`.
+
+## Contributing
+
+MIT licensed. Changes to ranking should come with a case in `tests/` — the gold-set scorer is
+how we keep recall@1 from regressing. See [CHANGELOG.md](CHANGELOG.md) for what shipped when.
