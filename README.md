@@ -22,8 +22,8 @@
 </p>
 
 <p align="center">
-  <sub>52 sessions, and the query is misspelled. Recorded against a synthetic corpus:
-  <code>./docs/record-demo.sh</code></sub>
+  <sub>Two searches over 52 sessions. The second one is misspelled on purpose.
+  Recorded against a synthetic corpus, not real transcripts.</sub>
 </p>
 
 ## Why not just `/resume`?
