@@ -433,10 +433,29 @@ def _highlight(text, terms, code="\033[1;30;43m"):
 ROW_TEXT_WIDTH = 160        # keeps -n rows one terminal line each, however big the message was
 
 
-def fmt_row(l, terms=()):
+def _agent_tag(source):
+    """Name the agent side of a session after the tool it came from: cc (Claude) or cx (Codex).
+
+    The session list already marks the source that way, so a row or preview line that calls
+    every assistant turn `cc` contradicts the column two inches to its left.
+    """
+    return "cx" if source == "codex" else "cc"
+
+
+def _source_map():
+    """sid -> source, from the index build_index() writes. Missing/unreadable reads as Claude,
+    which is what the rest of the tool defaults to."""
+    try:
+        index = json.load(open(INDEX_PATH))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {sid: info.get("source", "cc") for sid, info in index.items()}
+
+
+def fmt_row(l, terms=(), source="cc"):
     f = (l.split(SEP) + [""] * 8)[:8]
     sid, cwd, branch, ts, role, seq, title, text = f
-    tag = {"user": "you", "assistant": "cc", "thinking": "th"}.get(role, role)
+    tag = {"user": "you", "assistant": _agent_tag(source), "thinking": "th"}.get(role, role)
     body = _snippet(text, [t for t in terms if t], ROW_TEXT_WIDTH)
     return f"{ts[:10]}  {short_proj(cwd)[:18]:<18}  {tag:<3} {title[:32]:<32} │ {body}"
 
@@ -447,8 +466,9 @@ def print_matches(lines, query, limit=40):
         print("No matches.", file=sys.stderr)
         return 1
     terms = [t.lower() for t in query.split()]
+    sources = _source_map()
     for l in hits[:limit]:
-        print(fmt_row(l, terms))
+        print(fmt_row(l, terms, sources.get(l.split(SEP, 1)[0], "cc")))
     extra = len(hits) - limit
     if extra > 0:
         print(f"... and {extra} more (narrow the query or use the fzf TUI).", file=sys.stderr)
@@ -463,8 +483,8 @@ def _session_path(sid):
     return None
 
 
-def _label(role):
-    return {"user": "\033[36myou\033[0m", "assistant": "\033[32mcc \033[0m",
+def _label(role, source="cc"):
+    return {"user": "\033[36myou\033[0m", "assistant": f"\033[32m{_agent_tag(source)} \033[0m",
             "thinking": "\033[90mth \033[0m"}.get(role, (role + "   ")[:3])
 
 
@@ -662,7 +682,7 @@ def render_preview(sid, thinking, query):
         first_user = next((r for r, _ in tagged if r[4] == "user"), None)
         if first_user:
             print(f"\n\033[2mopened with\033[0m  {_snippet(first_user[7], [], 220)}")
-        print(f"\033[2mlast\033[0m  {_label(rows[-1][4])} {_snippet(rows[-1][7], [], 220)}")
+        print(f"\033[2mlast\033[0m  {_label(rows[-1][4], source)} {_snippet(rows[-1][7], [], 220)}")
 
     if keys:
         # Same keys AND the same word-start rule as rank_sessions, matched on message text
@@ -684,7 +704,7 @@ def render_preview(sid, thinking, query):
 
         for r, sub in matches[:6]:
             tag = "\033[35m⤷\033[0m" if sub else " "
-            print(f"{tag}{_label(r[4])} {_snippet(r[7], keys, 200)}")
+            print(f"{tag}{_label(r[4], source)} {_snippet(r[7], keys, 200)}")
         if len(matches) > 6:
             print(f"  \033[2m… {len(matches) - 6} more (resume to read)\033[0m")
         if not matches:
