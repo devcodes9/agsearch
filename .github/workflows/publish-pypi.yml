@@ -21,6 +21,12 @@ jobs:
         with:
           python-version: "3.13"
 
+      # A PyPI upload cannot be replaced, only yanked, so the suite has to pass
+      # in THIS workflow. release.yml also runs it, but it is a separate
+      # workflow: a failure there does not stop this one from publishing.
+      - name: Tests
+        run: python3 -m unittest discover -s tests
+
       - name: Build sdist and wheel
         run: |
           python -m pip install --upgrade build
