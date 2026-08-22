@@ -1,13 +1,13 @@
 <h1 align="center">agsearch</h1>
 
 <p align="center">
-  <strong><code>/resume</code> searches session titles.<br>
-  agsearch searches what was said inside them.</strong>
+  <strong>Find the session you remember,<br>
+  even when you don't remember its title.</strong>
 </p>
 
 <p align="center">
   Ranked full-text search across every <strong>Claude Code</strong> and
-  <strong>OpenAI Codex</strong> session on your machine.
+  <strong>Codex CLI</strong> session on your machine.
 </p>
 
 <p align="center">
