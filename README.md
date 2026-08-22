@@ -43,7 +43,9 @@ uvx agsearch -n "stripe tax id"
 - **Full-conversation search.** Search user prompts and assistant replies, not only titles and
   session metadata.
 - **One list for both tools.** Claude Code and Codex sessions appear together, labelled `cc`
-  and `cx`.
+  and `cx`. Adding another agent is a parser plus a source entry, with no change to search or
+  ranking — [Gemini CLI and opencode](https://github.com/devcodes9/agsearch/issues/40) are the
+  tracked candidates.
 - **Ranked results.** BM25 ranking favors focused sessions and shows matching lines in context.
 - **Preview, read, or resume.** Inspect a match, open the transcript in a pager, or return to the
   original session.
