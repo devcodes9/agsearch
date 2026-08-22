@@ -70,8 +70,18 @@ uv tool install agsearch
 pipx install agsearch
 ```
 
-Install [`fzf`](https://github.com/junegunn/fzf) separately for the interactive interface.
-Without it, `agsearch -n "query"` still works.
+These do not bring `fzf`, which the interactive interface needs:
+
+```sh
+sudo apt install fzf      # Debian, Ubuntu
+sudo dnf install fzf      # Fedora
+sudo pacman -S fzf        # Arch
+brew install fzf          # macOS, Linuxbrew
+```
+
+No sudo? `git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf && ~/.fzf/install`.
+
+Without fzf, `agsearch -n "query"` still prints ranked matches.
 
 ### Install script
 
