@@ -1,0 +1,71 @@
+name: publish-pypi
+
+# Publishes to PyPI on a v* tag using Trusted Publishing (OIDC) — no API token
+# stored in the repo. One-time setup on PyPI: add a trusted publisher for
+# devcodes9/agsearch, workflow `publish-pypi.yml`, environment `pypi`.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      # A PyPI upload cannot be replaced, only yanked, so the suite has to pass
+      # in THIS workflow. release.yml also runs it, but it is a separate
+      # workflow: a failure there does not stop this one from publishing.
+      - name: Tests
+        run: python3 -m unittest discover -s tests
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      # The dist is built from the version literal in agsearch, so a tag that
+      # disagrees would publish a file nobody can correlate to a release. PyPI
+      # uploads are irreversible — a wrong version can never be replaced, only
+      # yanked — so this check has to happen before the upload, not after.
+      - name: Built version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ls dist/
+          test -f "dist/agsearch-$tag.tar.gz" || {
+            echo "::error::no dist/agsearch-$tag.tar.gz — tag and __version__ disagree"
+            exit 1
+          }
+
+      - name: Install the wheel and exercise it
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install dist/*.whl
+          /tmp/v/bin/agsearch --version
+          /tmp/v/bin/agsearch --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # required for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
