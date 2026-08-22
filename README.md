@@ -30,8 +30,9 @@ agsearch
 
 Type anything you remember from a past conversation. Select a result to resume it.
 
-Brew is first because it also installs `fzf`, which the interactive interface needs. To try a
-single search without installing anything, and without the interface:
+Homebrew also installs `fzf`, which the interactive interface needs.
+
+To run one search without installing anything:
 
 ```sh
 uvx agsearch -n "stripe tax id"
