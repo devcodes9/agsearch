@@ -6,8 +6,8 @@
 </p>
 
 <p align="center">
-  Ranked full-text search across every <strong>Claude Code</strong> and
-  <strong>Codex CLI</strong> session on your machine.
+  Ranked full-text search across the coding-agent sessions already on your machine.<br>
+  <strong>Claude Code</strong> and <strong>Codex CLI</strong> today, more next.
 </p>
 
 <p align="center">
