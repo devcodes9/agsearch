@@ -3,9 +3,9 @@
 agsearch — global full-text search across all your coding agent sessions.
 
 Claude Code and Codex CLI each store every session as local JSONL (~/.claude/projects/
-and ~/.codex/sessions/). Neither has cross-session search. This indexes all of them into
-one ranked search, shows the matched lines, and drops you straight back into the session
-with `claude --resume` or `codex resume`.
+and ~/.codex/sessions/). Their native pickers search session *metadata* — the title, the
+first prompt, the branch. This searches what was actually *said*, across both tools, and
+drops you straight back into the session with `claude --resume` or `codex resume`.
 
 Usage:
     agsearch                       # interactive fuzzy TUI (needs fzf)
@@ -15,6 +15,7 @@ Usage:
     agsearch --project myapp       # only sessions whose path matches 'myapp'
     agsearch --thinking            # also index assistant thinking blocks
     agsearch --reindex             # force a full rebuild of the cache
+    agsearch --version             # print the installed version and exit
     agsearch _preview <sid> <seq> <thinking> <query...>   # (internal) fzf preview
 
 In the TUI the right pane previews the matched session, auto-scrolled to your match
@@ -26,6 +27,8 @@ surviving ancestor dir. Sessions that still look live are marked ● and confirm
 Warm runs are near-instant: parsed sessions are cached per-file and only re-parsed
 when their .jsonl mtime changes.
 """
+
+__version__ = "0.1.0"
 
 import os
 import re
@@ -258,6 +261,54 @@ def _frag_path(jsonl_path):
     return os.path.join(FRAG_DIR, key + ".tsv")
 
 
+# A cold build over ~1,200 sessions takes several seconds. Silence for that long
+# reads as "hung" and is the cheapest bounce in the product, so we narrate it —
+# but only when there is real work and someone watching. Warm runs re-parse a
+# handful of files and must stay silent; piped/redirected stderr must stay clean
+# so `agsearch -n` output can be consumed by scripts.
+PROGRESS_MIN_FILES = 25     # below this a rebuild is fast enough to need no narration
+
+
+class _IndexProgress:
+    """Single overwriting stderr line: 'indexing 412/1238 sessions...'."""
+
+    def __init__(self, total, stream=None):
+        self.total = total
+        self.done = 0
+        self.stream = stream if stream is not None else sys.stderr
+        self.active = total >= PROGRESS_MIN_FILES and _isatty(self.stream)
+        self._width = 0
+
+    def tick(self):
+        self.done += 1
+        if not self.active:
+            return
+        # Repaint on the first file, then ~every 1%, so a big corpus does not
+        # spend its time writing escape codes.
+        step = max(1, self.total // 100)
+        if self.done != 1 and self.done % step and self.done != self.total:
+            return
+        msg = f"indexing {self.done}/{self.total} sessions..."
+        self._width = max(self._width, len(msg))
+        self.stream.write("\r" + msg.ljust(self._width))
+        self.stream.flush()
+
+    def done_(self):
+        """Erase the line so it leaves no residue above the TUI or the results."""
+        if not self.active or not self._width:
+            return
+        self.stream.write("\r" + " " * self._width + "\r")
+        self.stream.flush()
+        self._width = 0
+
+
+def _isatty(stream):
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 def build_index(include_thinking=False, force=False):
     """Return the full index as a list of TSV strings, refreshing per-file caches."""
     os.makedirs(FRAG_DIR, exist_ok=True)
@@ -281,16 +332,28 @@ def build_index(include_thinking=False, force=False):
                     if fn.endswith(".jsonl"):
                         files.append((os.path.join(r, fn), source, parser))
 
+    # Stat every file once up front: the same mtimes decide cache hits below and
+    # tell us how many sessions actually need parsing, which is what we report.
+    mtimes = {}
+    stale = 0
+    for path, _source, _parser in files:
+        try:
+            mtimes[path] = os.path.getmtime(path)
+        except OSError:
+            continue
+        if force or meta.get(path) != mtimes[path] or not os.path.exists(_frag_path(path)):
+            stale += 1
+    progress = _IndexProgress(stale)
+
     new_meta = {"_thinking": include_thinking, "_fmt": CACHE_FMT}
     live_frags = set()
     lines = []
     sub_map = {}                        # parent sid -> [subagent file paths] (Claude only)
     index = {}                          # sid -> {source, path} for preview + resume routing
     for path, source, parser in files:
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
+        if path not in mtimes:              # vanished between the stat pass and now
             continue
+        mtime = mtimes[path]
         frag = _frag_path(path)
         live_frags.add(os.path.basename(frag))
         if not force and meta.get(path) == mtime and os.path.exists(frag):
@@ -301,6 +364,7 @@ def build_index(include_thinking=False, force=False):
             frag_lines = [SEP.join(r) for r in rows]
             with open(frag, "w") as fh:
                 fh.write("\n".join(frag_lines))
+            progress.tick()
         new_meta[path] = mtime
         lines.extend(frag_lines)
         if not frag_lines:
@@ -318,6 +382,8 @@ def build_index(include_thinking=False, force=False):
                 os.remove(os.path.join(FRAG_DIR, fn))
             except OSError:
                 pass
+
+    progress.done_()
 
     json.dump(new_meta, open(META_PATH, "w"))
     json.dump(sub_map, open(SUBMAP_PATH, "w"))
@@ -367,10 +433,29 @@ def _highlight(text, terms, code="\033[1;30;43m"):
 ROW_TEXT_WIDTH = 160        # keeps -n rows one terminal line each, however big the message was
 
 
-def fmt_row(l, terms=()):
+def _agent_tag(source):
+    """Name the agent side of a session after the tool it came from: cc (Claude) or cx (Codex).
+
+    The session list already marks the source that way, so a row or preview line that calls
+    every assistant turn `cc` contradicts the column two inches to its left.
+    """
+    return "cx" if source == "codex" else "cc"
+
+
+def _source_map():
+    """sid -> source, from the index build_index() writes. Missing/unreadable reads as Claude,
+    which is what the rest of the tool defaults to."""
+    try:
+        index = json.load(open(INDEX_PATH))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {sid: info.get("source", "cc") for sid, info in index.items()}
+
+
+def fmt_row(l, terms=(), source="cc"):
     f = (l.split(SEP) + [""] * 8)[:8]
     sid, cwd, branch, ts, role, seq, title, text = f
-    tag = {"user": "you", "assistant": "cc", "thinking": "th"}.get(role, role)
+    tag = {"user": "you", "assistant": _agent_tag(source), "thinking": "th"}.get(role, role)
     body = _snippet(text, [t for t in terms if t], ROW_TEXT_WIDTH)
     return f"{ts[:10]}  {short_proj(cwd)[:18]:<18}  {tag:<3} {title[:32]:<32} │ {body}"
 
@@ -381,8 +466,9 @@ def print_matches(lines, query, limit=40):
         print("No matches.", file=sys.stderr)
         return 1
     terms = [t.lower() for t in query.split()]
+    sources = _source_map()
     for l in hits[:limit]:
-        print(fmt_row(l, terms))
+        print(fmt_row(l, terms, sources.get(l.split(SEP, 1)[0], "cc")))
     extra = len(hits) - limit
     if extra > 0:
         print(f"... and {extra} more (narrow the query or use the fzf TUI).", file=sys.stderr)
@@ -395,11 +481,6 @@ def _session_path(sid):
             if sid + ".jsonl" in files:
                 return os.path.join(root, sid + ".jsonl")
     return None
-
-
-def _label(role):
-    return {"user": "\033[36myou\033[0m", "assistant": "\033[32mcc \033[0m",
-            "thinking": "\033[90mth \033[0m"}.get(role, (role + "   ")[:3])
 
 
 def _turn_header(role, source, is_sub):
@@ -583,6 +664,13 @@ def _arc_segments(tagged, source):
     return segs
 
 
+# Six turns with a blank line between each ran 1.76x the old card's height, so a
+# preview that used to fit began to scroll. Four turns and no blank lines lands at
+# 1.05x: the gutter (`> you`) already separates turns, so the blank line was paying
+# ~30% of the height for separation it was not providing.
+PREVIEW_TURNS = 4
+
+
 def _preview_lines(tagged, keys, source):
     """The preview body, rendered as a chat excerpt. Returns lines; kept pure so it is testable.
 
@@ -603,7 +691,7 @@ def _preview_lines(tagged, keys, source):
             head = "● matched on title or first prompt, not in any turn"
         segs.append([f"\033[1;33m{head}\033[0m"])
 
-        shown = matches[:6]
+        shown = matches[:PREVIEW_TURNS]
         if shown:
             shown_rows = [r for r, _sub in shown]
             opening = next(((r, sub) for r, sub in tagged if r[4] == "user"), None)
@@ -612,17 +700,15 @@ def _preview_lines(tagged, keys, source):
                 segs.append(["\033[2m⋯\033[0m"])
             for r, sub in shown:
                 segs.append(_turn(r, sub, source, keys))
-            if len(matches) > 6:
-                segs.append([f"\033[2m… {len(matches) - 6} more (resume to read)\033[0m"])
+            if len(matches) > PREVIEW_TURNS:
+                segs.append([f"\033[2m… {len(matches) - PREVIEW_TURNS} more (resume to read)\033[0m"])
         else:
             segs += _arc_segments(tagged, source)
     else:
         segs += _arc_segments(tagged, source)
 
     out = []
-    for i, seg in enumerate(segs):
-        if i:
-            out.append("")
+    for seg in segs:
         out += seg
     return out
 
@@ -1263,6 +1349,9 @@ def main(argv):
         elif a in ("-h", "--help"):
             print(__doc__)
             return 0
+        elif a in ("-V", "--version"):
+            print("agsearch " + __version__)
+            return 0
         else:
             query_parts.append(a)
         i += 1
@@ -1279,7 +1368,14 @@ def main(argv):
     return run_fzf(lines, query, thinking=thinking, no_resume=no_resume, fuzzy=fuzzy)
 
 
-if __name__ == "__main__":
+def _entry():
+    """Console-script entry point.
+
+    A [project.scripts] entry point is called with no arguments, while main()
+    takes argv — so the two cannot be wired directly. This wrapper is what
+    `pipx`/`uvx`/`pip install agsearch` invoke, and running the file directly
+    goes through it too, so both paths share one error-handling path.
+    """
     try:
         sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
@@ -1289,3 +1385,7 @@ if __name__ == "__main__":
     except Exception:                       # never let the popup vanish without a reason
         import traceback
         _die("agsearch crashed:\n\n" + traceback.format_exc())
+
+
+if __name__ == "__main__":
+    _entry()

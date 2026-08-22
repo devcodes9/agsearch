@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Cheap insurance, and universal among well-packaged CLIs: refuse to
+      # publish a tag that disagrees with the version literal in the source.
+      # A release named v0.2.0 that reports 0.1.0 is worse than no release.
+      - name: Tag matches __version__
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          src="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' agsearch)"
+          echo "tag=$tag source=$src"
+          [ -n "$src" ] || { echo "no __version__ literal found in agsearch"; exit 1; }
+          [ "$tag" = "$src" ] || {
+            echo "::error::tag $GITHUB_REF_NAME does not match __version__ $src"
+            exit 1
+          }
+
+      - name: CHANGELOG has a section for this release
+        run: |
+          grep -q "^## \[${GITHUB_REF_NAME#v}\]" CHANGELOG.md || {
+            echo "::error::CHANGELOG.md has no '## [${GITHUB_REF_NAME#v}]' section"
+            exit 1
+          }
+
+      - name: Tests
+        run: python3 -m unittest discover -s tests
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          # Everything between this version's heading and the next one.
+          awk -v v="${GITHUB_REF_NAME#v}" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/         { exit }   # next version section
+            on && /^\[.*\]: http/  { exit }   # the link-reference footer
+            on                     { print }
+          ' CHANGELOG.md > release-notes.md
+          cat release-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: agsearch
+          generate_release_notes: false

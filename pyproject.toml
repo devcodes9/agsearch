@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agsearch"
+description = "Search every Claude Code and Codex CLI session by what was said in it, then resume it"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Dev Dalia" }]
+keywords = ["claude-code", "codex", "cli", "search", "tui", "session", "resume"]
+requires-python = ">=3.9"
+
+# Deliberately empty, and it is a feature. agsearch is stdlib-only, which is
+# what makes `uvx agsearch` resolve instantly with nothing to compile.
+dependencies = []
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Utilities",
+]
+
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/devcodes9/agsearch"
+Changelog = "https://github.com/devcodes9/agsearch/blob/main/CHANGELOG.md"
+Issues = "https://github.com/devcodes9/agsearch/issues"
+
+[project.scripts]
+agsearch = "agsearch:_entry"
+
+# One version literal, read straight out of the CLI. Nothing to keep in sync.
+[tool.hatch.version]
+path = "agsearch"
+pattern = '^__version__ = "(?P<version>[^"]+)"'
+
+# agsearch ships as an extensionless executable at the repo root, because that
+# is what `curl | sh` installs onto a PATH. Python needs it importable as
+# `agsearch.py`, so the build maps it rather than renaming the file — one
+# source of truth, both distribution shapes.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true                       # there is no package dir to auto-detect
+force-include = { "agsearch" = "agsearch.py" }
+
+[tool.hatch.build.targets.sdist]
+include = ["agsearch", "pyproject.toml", "README.md", "LICENSE", "CHANGELOG.md", "tests"]

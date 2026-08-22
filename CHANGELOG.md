@@ -1,0 +1,48 @@
+# Changelog
+
+All notable changes to agsearch are documented here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
+this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+While agsearch is on `0.x`, the CLI surface may still change between minor
+versions. Anything that changes it will be listed under **Changed** with the
+migration in the same line.
+
+## [Unreleased]
+
+## [0.1.0] - 2026-08-21
+
+The packaging release. agsearch has worked for a while; this is the first
+version you can name, install reproducibly, and report a bug against.
+
+### Added
+
+- **MIT license.** The repo was previously unlicensed, which meant "all rights
+  reserved" by default and made it ineligible for every package manager.
+- **`--version` / `-V`**, backed by a single `__version__` literal that
+  packaging reads directly, so the tag, the formula and the CLI cannot drift.
+- **Cold-build progress.** The first index over a large corpus takes several
+  seconds; it now reports `indexing 412/1238 sessions...` instead of appearing
+  to hang. Silent on warm runs and whenever stderr is not a tty, so piped
+  output stays clean.
+- **Homebrew tap** — `brew install devcodes9/tap/agsearch`, which resolves both
+  PATH and the `fzf` dependency in one step.
+- **PyPI** — `uvx agsearch -n "query"` runs the tool with nothing installed.
+  Published via Trusted Publishing, so no API token exists in the repo.
+- **CI** across macOS and Linux on Python 3.9 and 3.13, including a smoke test
+  that runs the installer end to end.
+
+### Changed
+
+- **`install.sh` installs the latest tagged release** rather than `main` HEAD.
+  Pin with `AGSEARCH_VERSION=v0.1.0`, or take unreleased tip with
+  `AGSEARCH_VERSION=main`. Downloads are staged and validated before landing on
+  your PATH, so a failed fetch can no longer install a broken script.
+- **README** documents the current competitive picture: native `/resume` and
+  `codex resume` now search session *metadata*, so the claim is no longer "they
+  have no cross-session search" but that they search titles while agsearch
+  searches what was said.
+
+[Unreleased]: https://github.com/devcodes9/agsearch/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/devcodes9/agsearch/releases/tag/v0.1.0
