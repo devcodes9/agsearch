@@ -23,20 +23,19 @@ Everything stays on your machine.
 
 ## Quick start
 
-Try a search without installing anything:
-
-```sh
-uvx agsearch -n "stripe tax id"
-```
-
-For the interactive interface:
-
 ```sh
 brew install devcodes9/tap/agsearch
 agsearch
 ```
 
 Type anything you remember from a past conversation. Select a result to resume it.
+
+Brew is first because it also installs `fzf`, which the interactive interface needs. To try a
+single search without installing anything, and without the interface:
+
+```sh
+uvx agsearch -n "stripe tax id"
+```
 
 ## Features
 
