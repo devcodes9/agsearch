@@ -21,11 +21,6 @@
        width="100%">
 </p>
 
-<p align="center">
-  <sub>Two searches over 52 sessions. The second one is misspelled on purpose.
-  Recorded against a synthetic corpus, not real transcripts.</sub>
-</p>
-
 ## Why not just `/resume`?
 
 Claude Code's `/resume` picker and `codex resume` both got good recently — `/resume` searches
@@ -177,7 +172,7 @@ opened the session *asking for*, so it's weighted hardest; **length normalizatio
 sprawling transcript that mentions your term once no longer outranks a short, on-point session.
 Near-ties are then nudged by **recency** and by how often you've actually resumed that session
 (read off agsearch's own resume log). Badge `N/T` = query terms matched. A word that barely exists
-anywhere (a typo like `alibrry`) falls back to subsequence matching. No modes or flags.
+anywhere (a typo like `conection`) falls back to subsequence matching. No modes or flags.
 
 **Honest limit:** this is lexical, not semantic. Ranking beats an unordered `rg` dump, but it
 is not a guarantee that row one is the session you meant. Because transcripts are large,
