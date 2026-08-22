@@ -1,9 +1,9 @@
 #!/bin/sh
-# agsearch installer — drops the CLI on your PATH and checks its dependencies.
+# Install agsearch to ~/.local/bin (or $PREFIX).
 #
 #   curl -fsSL https://raw.githubusercontent.com/devcodes9/agsearch/main/install.sh | sh
 #
-# By default this installs the latest tagged release. Override with:
+# Installs the latest tagged release. Override with:
 #   AGSEARCH_VERSION=v0.1.0 sh install.sh    # a specific release
 #   AGSEARCH_VERSION=main   sh install.sh    # unreleased tip, for testing
 #   PREFIX=/usr/local/bin   sh install.sh    # a different install location
@@ -12,60 +12,58 @@ set -eu
 REPO="devcodes9/agsearch"
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 TARGET="$PREFIX/agsearch"
+MAIN_URL="https://raw.githubusercontent.com/$REPO/main/agsearch"
 
 command -v python3 >/dev/null 2>&1 || {
-  echo "error: python3 is required but not found on PATH." >&2
+  echo "error: python3 is required." >&2
   exit 1
 }
 
-# Resolve which revision to install. Pinning to a tag is the point: without it
-# every install is a different, unnamed build and nobody can say which one broke.
-resolve_latest() {
-  command -v curl >/dev/null 2>&1 || return 1
-  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | head -n 1
+# Download to .tmp and validate before moving into place, so a truncated fetch
+# or a 404 body can never leave a broken agsearch on someone's PATH.
+fetch() {
+  curl -fsSL "$1" -o "$TARGET.tmp" 2>/dev/null || { rm -f "$TARGET.tmp"; return 1; }
+  head -n 1 "$TARGET.tmp" | grep -q '^#!' || { rm -f "$TARGET.tmp"; return 1; }
 }
 
-# A clone installs what is checked out; only a remote install needs a revision.
-if [ -f "./agsearch" ] && [ -z "${AGSEARCH_VERSION:-}" ]; then
-  mkdir -p "$PREFIX"
-  install -m 0755 "./agsearch" "$TARGET"
-  REF="$(git describe --tags --always --dirty 2>/dev/null || echo local)"
-else
-  REF="${AGSEARCH_VERSION:-}"
-  if [ -z "$REF" ]; then
-    REF="$(resolve_latest || true)"
-    if [ -z "$REF" ]; then
-      # No releases yet, or the API is unreachable / rate-limited. Say so rather
-      # than silently serving an unnamed build.
-      echo "note: could not resolve the latest release — falling back to main." >&2
-      echo "      pin explicitly with: AGSEARCH_VERSION=v0.1.0 sh install.sh" >&2
-      REF="main"
-    fi
-  fi
+mkdir -p "$PREFIX"
 
-  mkdir -p "$PREFIX"
-  URL="https://raw.githubusercontent.com/$REPO/$REF/agsearch"
-  curl -fsSL "$URL" -o "$TARGET.tmp" || {
-    rm -f "$TARGET.tmp"
-    echo "error: could not download agsearch at '$REF'." >&2
-    echo "       $URL" >&2
-    echo "       check the version exists: https://github.com/$REPO/releases" >&2
+if [ -f "./agsearch" ] && [ -z "${AGSEARCH_VERSION:-}" ]; then
+  install -m 0755 "./agsearch" "$TARGET"        # local checkout
+else
+  command -v curl >/dev/null 2>&1 || {
+    echo "error: curl is required to install remotely." >&2
     exit 1
   }
-  # Download to .tmp and move into place only after it checks out, so a failed
-  # or truncated fetch can never leave a broken agsearch on someone's PATH.
-  head -n 1 "$TARGET.tmp" | grep -q '^#!' || {
-    rm -f "$TARGET.tmp"
-    echo "error: '$REF' did not resolve to an agsearch script." >&2
-    exit 1
-  }
+  # /releases/latest/download resolves the newest tag server-side. No API call,
+  # so no 60-request/hour rate limit and no JSON to parse.
+  case "${AGSEARCH_VERSION:-}" in
+    "")     URL="https://github.com/$REPO/releases/latest/download/agsearch" ;;
+    main)   URL="$MAIN_URL" ;;
+    *)      URL="https://github.com/$REPO/releases/download/$AGSEARCH_VERSION/agsearch" ;;
+  esac
+
+  if ! fetch "$URL"; then
+    if [ -n "${AGSEARCH_VERSION:-}" ]; then
+      echo "error: could not download agsearch from $URL" >&2
+      echo "       check the version exists: https://github.com/$REPO/releases" >&2
+      exit 1
+    fi
+    # No tagged release yet. Say so rather than failing the install outright.
+    echo "note: no tagged release found — installing from main." >&2
+    fetch "$MAIN_URL" || {
+      echo "error: could not download agsearch from $MAIN_URL" >&2
+      exit 1
+    }
+  fi
   chmod 0755 "$TARGET.tmp"
   mv "$TARGET.tmp" "$TARGET"
 fi
 
-echo "installed: $TARGET ($REF)"
+# Read the version out of the file rather than running it: a freshly downloaded
+# script should not be executed just to print a label.
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$TARGET" | head -n 1)"
+echo "installed: $TARGET${VERSION:+ (v$VERSION)}"
 
 case ":$PATH:" in
   *":$PREFIX:"*) ;;
@@ -77,7 +75,6 @@ if ! command -v fzf >/dev/null 2>&1; then
   echo "note: fzf is not installed — the interactive TUI needs it."
   echo "      macOS: brew install fzf   ·   Linux: see https://github.com/junegunn/fzf"
   echo "      (agsearch -n \"query\" works without fzf)"
-  echo "      or skip both steps: brew install devcodes9/tap/agsearch"
 fi
 
 echo "done. run: agsearch"
