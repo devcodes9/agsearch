@@ -180,7 +180,8 @@ deliberate future step, not more matching heuristics.
 
 - Walks `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/*.jsonl`, extracting user
   prompts and assistant text (one row per message) plus each session's AI-generated title.
-  A source-adapter layer means new agents (Cursor, Gemini, …) are just another parser.
+  A source-adapter layer means new agents (Gemini CLI, Cursor, …) slot in without touching
+  search or ranking.
 - Caches parsed output per file, keyed by mtime, under `~/.cache/agsearch/`. Only changed
   sessions are re-parsed on later runs.
 - The JSONL schema is Claude Code's internal format and can change between releases; if a
