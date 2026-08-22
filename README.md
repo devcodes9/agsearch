@@ -89,7 +89,9 @@ agsearch --version           # print the installed version
 ```
 
 **Enter** resumes the session (cd's to its project dir, runs `claude --resume`), **Ctrl-/**
-toggles the preview. Add `--no-resume` to print the resume command instead.
+toggles the preview. **Ctrl-o** opens the whole conversation in your pager — no resume, no CLI
+start, no tokens spent — which is usually all you needed to check you had the right session.
+**Ctrl-y** copies the reattach command. Add `--no-resume` to print it instead.
 
 Search is **exact substring, AND-of-terms** by default (`stripe webhook` = both words). Operators
 work in either mode: `'word` force-exact, `^prefix`, `suffix$`, `!exclude`, `a | b` for OR. Pass

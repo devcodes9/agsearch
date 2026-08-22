@@ -116,7 +116,7 @@ def _single_line(s, limit=400):
     return " ".join(s.split())[:limit]
 
 
-def parse_session(path, include_thinking=False):
+def parse_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
     """Parse one .jsonl file into ordered index rows (8-field lists, seq assigned).
 
     Rows are keyed by each entry's `sessionId` field, not the filename. For normal sessions
@@ -165,7 +165,7 @@ def parse_session(path, include_thinking=False):
                             rows.append([session_id, cwd, branch, ts, "thinking", title,
                                          _single_line(b["thinking"])])
 
-            text = _single_line(_flatten_content(msg.get("content", "")), MSG_INDEX_CHARS)
+            text = _single_line(_flatten_content(msg.get("content", "")), limit)
             if not text:
                 continue
             rows.append([session_id, cwd, branch, ts, role, title, text])
@@ -199,7 +199,7 @@ def _codex_title(user_texts):
     return ""
 
 
-def parse_codex_session(path, include_thinking=False):
+def parse_codex_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
     """Parse an OpenAI Codex CLI rollout file into the same 8-field row schema as Claude.
 
     Session id/cwd come from the `session_meta` entry; messages are `response_item` entries of
@@ -244,7 +244,7 @@ def parse_codex_session(path, include_thinking=False):
                 text = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("text"))
             else:
                 text = ""
-            text = _single_line(text, MSG_INDEX_CHARS)
+            text = _single_line(text, limit)
             if not text or text.lstrip().startswith(_CODEX_NOISE):
                 continue
             rows.append([sid, cwd, branch, o.get("timestamp") or ts0, p["role"], "", "", text])
@@ -713,14 +713,18 @@ def _preview_lines(tagged, keys, source):
     return out
 
 
-def render_preview(sid, thinking, query):
-    """Compact preview card for one session (no full transcript — that's what resume is for).
+def _flag(v):
+    """A flag that arrived either as a Python bool or as an argv string from fzf."""
+    return str(v).lower() in ("1", "true")
 
-    With a query: the matched lines only, highlighted. Without one: the bookends (first prompt
-    + last message) so you know what it was about. Merges subagent transcripts (tagged ⤷) so
-    their content is previewable too. Re-runs per keystroke via fzf's {q}.
+
+def load_session_rows(sid, thinking=False, limit=MSG_INDEX_CHARS):
+    """(source, [(row, is_subagent)]) for one session, chronological.
+
+    Shared by the preview card and the transcript reader so both see exactly the
+    same conversation, subagent turns folded in and all. `limit` is what separates
+    them: the card reuses the index cap, the reader asks for the full text.
     """
-    thinking = str(thinking) == "1"
     try:
         index = json.load(open(INDEX_PATH))
     except (OSError, json.JSONDecodeError):
@@ -729,23 +733,79 @@ def render_preview(sid, thinking, query):
     source = info.get("source", "cc")
     path = info.get("path") or _session_path(sid)
 
-    # Gather (row, is_subagent) pairs. Codex sessions have no subagents; Claude folds them in.
+    # Codex sessions have no subagents; Claude folds them in.
     tagged = []
     if source == "codex":
         if path:
-            _s, rows0 = parse_codex_session(path, include_thinking=thinking)
+            _s, rows0 = parse_codex_session(path, include_thinking=thinking, limit=limit)
             tagged = [(r, False) for r in rows0]
     else:
         if path:
-            _s, prows = parse_session(path, include_thinking=thinking)
+            _s, prows = parse_session(path, include_thinking=thinking, limit=limit)
             tagged += [(r, False) for r in prows]
         try:
             submap = json.load(open(SUBMAP_PATH))
         except (OSError, json.JSONDecodeError):
             submap = {}
         for sp in submap.get(sid, [])[:40]:
-            _s, srows = parse_session(sp, include_thinking=thinking)
+            _s, srows = parse_session(sp, include_thinking=thinking, limit=limit)
             tagged += [(r, True) for r in srows]
+    tagged.sort(key=lambda x: x[0][3])          # chronological by timestamp
+    return source, tagged
+
+
+def resume_line(sid, cwd):
+    """The paste-ready reattach line for one session id.
+
+    Built on resume_plan so this lands in the directory the session was actually
+    filed under. Reattaching from the cwd recorded on a message fails whenever
+    that cwd is a subdirectory of the launch dir, which is common.
+    """
+    _source, _bin, argv, cwd, target, _exists = resume_plan(sid, cwd)
+    return resume_command(target or cwd, argv)
+
+
+def render_transcript(sid, thinking="0", query=""):
+    """The whole conversation, readable, without resuming it.
+
+    Resuming to read costs a CLI start, a context load, and a session you then
+    have to leave. Usually you only wanted to check this is the right session or
+    lift one answer out of it. Matched turns are marked with a bar so the pager
+    can jump between them.
+    """
+    # Full text, not the index cap: this view exists to be read.
+    source, tagged = load_session_rows(sid, _flag(thinking), limit=100_000)
+    if not tagged:
+        print("(session not found)")
+        return
+    rows = [r for r, _ in tagged]
+    keys = query_keys(parse_query(query)) if query.strip() else []
+
+    r0 = rows[0]
+    title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
+    n_sub = sum(1 for _, sub in tagged if sub)
+    print(f"\033[1m{title[:80]}\033[0m")
+    print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
+          + (f" · {n_sub} subagent" if n_sub else "") + "\033[0m")
+    print(f"\033[2m{resume_line(sid, r0[1])}\033[0m\n")
+
+    for r, sub in tagged:
+        hit = bool(keys) and all(k in r[7].lower() for k in keys)
+        mark = "\033[1;33m▶\033[0m " if hit else "  "
+        print(mark + _turn_header(r[4], source, sub))
+        print(f"\033[2m{r[3][11:16]}\033[0m  " + _snippet(r[7], keys, 100_000))
+        print()
+
+
+def render_preview(sid, thinking, query):
+    """Compact preview card for one session (no full transcript — that's what resume is for).
+
+    With a query: the matched lines only, highlighted. Without one: the bookends (first prompt
+    + last message) so you know what it was about. Merges subagent transcripts (tagged ⤷) so
+    their content is previewable too. Re-runs per keystroke via fzf's {q}.
+    """
+    thinking = str(thinking) == "1"
+    source, tagged = load_session_rows(sid, thinking)
     if not tagged:
         print("(session not found)")
         return
@@ -1283,6 +1343,10 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
     fz = "1" if fuzzy else "0"
     filter_cmd = "python3 {} _filter {} {{q}}".format(shlex.quote(self), fz)
     preview = "python3 {} _preview {{1}} {} {{q}}".format(shlex.quote(self), thi)
+    pager = os.environ.get("AGSEARCH_PAGER") or os.environ.get("PAGER") or "less -R"
+    transcript = "python3 {} _transcript {{1}} {} {{q}} | {}".format(
+        shlex.quote(self), thi, pager)
+    copy_cmd = "python3 {} _copy {{1}} {{2}}".format(shlex.quote(self))
     args = [
         "fzf", "--ansi", "--delimiter", SEP, "--with-nth", "3", "--disabled",
         "--print-query",                 # so the clipboard gets what you actually typed
@@ -1291,8 +1355,17 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
         "--preview", preview,
         "--preview-window", "right,58%,wrap",
         "--header", "type to search all sessions · enter: resume (copies query for ⌘F) · "
-                    "ctrl-/: preview · ● = live session · 'orig dir gone' still resumes",
+                    "ctrl-o: read · ctrl-y: copy cmd · ctrl-/: preview · ● = live session",
         "--bind", "ctrl-/:toggle-preview",
+        # ctrl-o reads the whole conversation in a pager: no resume, no CLI start,
+        # no tokens. ctrl-y puts the reattach line on the clipboard.
+        #
+        # Only these two, and only on keys fzf leaves free. ctrl-u and ctrl-d are
+        # fzf defaults (unix-line-discard and delete-char/eof); rebinding them
+        # would take away "clear the query", which in a search box is the edit
+        # people reach for most.
+        "--bind", "ctrl-o:execute(" + transcript + ")",
+        "--bind", "ctrl-y:execute-silent(" + copy_cmd + ")+bell",
     ]
     if query:
         args += ["--query", query]
@@ -1323,6 +1396,16 @@ def main(argv):
         return 0
     if argv and argv[0] == "_filter":
         cmd_filter(argv[1:])
+        return 0
+    if argv and argv[0] == "_transcript":
+        render_transcript(argv[1] if len(argv) > 1 else "",
+                          argv[2] if len(argv) > 2 else "0", " ".join(argv[3:]))
+        return 0
+    if argv and argv[0] == "_copy":
+        sid = argv[1] if len(argv) > 1 else ""
+        cwd = argv[2] if len(argv) > 2 else ""
+        if sid:
+            copy_to_clipboard(resume_line(sid, cwd))
         return 0
 
     no_fzf = no_resume = here = thinking = reindex = fuzzy = False
