@@ -53,14 +53,25 @@ class FmtRowTests(unittest.TestCase):
 
 
 class LabelTests(unittest.TestCase):
-    def test_preview_label_follows_the_source(self):
-        self.assertEqual(strip(ag._label("assistant", "codex")), "cx ")
-        self.assertEqual(strip(ag._label("assistant", "cc")), "cc ")
-        self.assertEqual(strip(ag._label("assistant")), "cc ")
+    """The preview names the agent in the turn gutter, so these assert the
+    rendered gutter rather than a label helper. The list and `-n` paths keep the
+    two-character `cc`/`cx` form; only the preview spells the agent out."""
 
-    def test_non_agent_roles_are_unchanged(self):
-        self.assertEqual(strip(ag._label("user", "codex")), "you")
-        self.assertEqual(strip(ag._label("thinking", "codex")), "th ")
+    def _gutter(self, source):
+        # _preview_lines takes split rows, not the SEP-joined strings fmt_row takes.
+        turns = [(row("user", "the ask").split(ag.SEP), False),
+                 (row("assistant", "the reply").split(ag.SEP), False)]
+        return "\n".join(strip(l) for l in ag._preview_lines(turns, [], source))
+
+    def test_preview_names_the_agent_after_the_source(self):
+        self.assertIn("codex", self._gutter("codex"))
+        self.assertNotIn("claude", self._gutter("codex"))
+        self.assertIn("claude", self._gutter("cc"))
+        self.assertNotIn("codex", self._gutter("cc"))
+
+    def test_the_user_side_is_never_renamed(self):
+        for source in ("cc", "codex"):
+            self.assertIn("you", self._gutter(source))
 
 
 def write_codex_session(path, sid):
@@ -100,15 +111,15 @@ class PreviewSourceTests(unittest.TestCase):
             finally:
                 ag.INDEX_PATH, ag.SUBMAP_PATH = index_path, submap_path
 
-    def test_matched_codex_turn_is_labelled_cx(self):
+    def test_matched_codex_turn_is_named_codex(self):
         out = self._preview("widget regression")
-        self.assertIn("cx ", out)
-        self.assertNotIn("cc ", out)
+        self.assertIn("codex", out)
+        self.assertNotIn("claude", out)
 
-    def test_codex_bookends_are_labelled_cx(self):
-        out = self._preview("")           # no query → the opened-with / last card
-        self.assertIn("cx ", out)
-        self.assertNotIn("cc ", out)
+    def test_codex_arc_is_named_codex(self):
+        out = self._preview("")           # no query → the conversation arc
+        self.assertIn("codex", out)
+        self.assertNotIn("claude", out)
 
 
 if __name__ == "__main__":

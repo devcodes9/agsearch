@@ -483,9 +483,23 @@ def _session_path(sid):
     return None
 
 
-def _label(role, source="cc"):
-    return {"user": "\033[36myou\033[0m", "assistant": f"\033[32m{_agent_tag(source)} \033[0m",
-            "thinking": "\033[90mth \033[0m"}.get(role, (role + "   ")[:3])
+def _turn_header(role, source, is_sub):
+    """Chat-style role gutter for a preview turn: '▌ you', '▌ claude', '▌ ⤷ codex'.
+
+    The agent side is named after the source so the preview mirrors the tool the session came
+    from, the way you saw it in Claude Code or Codex.
+    """
+    agent = "codex" if source == "codex" else "claude"
+    name = {"user": "you", "assistant": agent, "thinking": "thinking"}.get(role, role or "?")
+    if is_sub:
+        return f"\033[35m▌ ⤷ {name}\033[0m"
+    color = {"user": "36", "assistant": "32", "thinking": "90"}.get(role, "37")
+    return f"\033[{color}m▌ {name}\033[0m"
+
+
+def _turn(row, is_sub, source, keys, width=200):
+    """One conversation turn: role gutter line, then the message."""
+    return [_turn_header(row[4], source, is_sub), _snippet(row[7], keys, width)]
 
 
 # --- snippet cleanup: transcripts are full of payloads nobody wants to read in a result row.
@@ -629,6 +643,76 @@ def best_matching(texts, keys):
     return [i for i, n in enumerate(counts) if n and n == best], best
 
 
+def _arc_segments(tagged, source):
+    """How the chat opened and where it ended, for when there is nothing matched to show."""
+    segs = []
+    idxs = []
+    first_user = next((i for i, (r, _s) in enumerate(tagged) if r[4] == "user"), None)
+    if first_user is not None:
+        idxs.append(first_user)
+        reply = next((i for i in range(first_user + 1, len(tagged))
+                      if tagged[i][0][4] == "assistant"), None)
+        if reply is not None:
+            idxs.append(reply)
+    for i in idxs:
+        segs.append(_turn(*tagged[i][:1], tagged[i][1], source, []))
+    last = len(tagged) - 1
+    if last >= 0 and last not in idxs:
+        if idxs and last > idxs[-1] + 1:
+            segs.append(["\033[2m⋯\033[0m"])
+        segs.append(_turn(tagged[last][0], tagged[last][1], source, []))
+    return segs
+
+
+# Six turns with a blank line between each ran 1.76x the old card's height, so a
+# preview that used to fit began to scroll. Four turns and no blank lines lands at
+# 1.05x: the gutter (`> you`) already separates turns, so the blank line was paying
+# ~30% of the height for separation it was not providing.
+PREVIEW_TURNS = 4
+
+
+def _preview_lines(tagged, keys, source):
+    """The preview body, rendered as a chat excerpt. Returns lines; kept pure so it is testable.
+
+    Matching rules are the ranker's, not a second set: word-start keys, exact AND when some
+    turn has every word, otherwise the closest turns. The chat shape is what changed — turns
+    with a role gutter instead of isolated snippet lines, anchored by the opening prompt so
+    what the chat was about stays visible even when the match is buried deep in it.
+    """
+    segs = []
+    if keys:
+        picked, best = best_matching([r[7] for r, _sub in tagged], keys)
+        matches = [tagged[i] for i in picked]
+        if best == len(keys):
+            head = f"● {len(matches)} match(es)"
+        elif best:
+            head = f"● {len(matches)} partial · best turn has {best} of {len(keys)} words"
+        else:
+            head = "● matched on title or first prompt, not in any turn"
+        segs.append([f"\033[1;33m{head}\033[0m"])
+
+        shown = matches[:PREVIEW_TURNS]
+        if shown:
+            shown_rows = [r for r, _sub in shown]
+            opening = next(((r, sub) for r, sub in tagged if r[4] == "user"), None)
+            if opening and opening[0] not in shown_rows:
+                segs.append(_turn(opening[0], opening[1], source, []))
+                segs.append(["\033[2m⋯\033[0m"])
+            for r, sub in shown:
+                segs.append(_turn(r, sub, source, keys))
+            if len(matches) > PREVIEW_TURNS:
+                segs.append([f"\033[2m… {len(matches) - PREVIEW_TURNS} more (resume to read)\033[0m"])
+        else:
+            segs += _arc_segments(tagged, source)
+    else:
+        segs += _arc_segments(tagged, source)
+
+    out = []
+    for seg in segs:
+        out += seg
+    return out
+
+
 def render_preview(sid, thinking, query):
     """Compact preview card for one session (no full transcript — that's what resume is for).
 
@@ -677,41 +761,10 @@ def render_preview(sid, thinking, query):
     print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
           + (f" · {n_sub} subagent" if n_sub else "") + gone + "\033[0m")
 
-    def bookends():
-        """What the session was about, for when there is nothing better to show."""
-        first_user = next((r for r, _ in tagged if r[4] == "user"), None)
-        if first_user:
-            print(f"\n\033[2mopened with\033[0m  {_snippet(first_user[7], [], 220)}")
-        print(f"\033[2mlast\033[0m  {_label(rows[-1][4], source)} {_snippet(rows[-1][7], [], 220)}")
-
-    if keys:
-        # Same keys AND the same word-start rule as rank_sessions, matched on message text
-        # only (not title/typo). Substring matching here would count `pr` inside `approach`
-        # and report matches the ranker never saw.
-        picked, best = best_matching([r[7] for r, _sub in tagged], keys)
-        matches = [tagged[i] for i in picked]
-
-        if best == len(keys):
-            head = f"● {len(matches)} match(es)"
-        elif best:
-            # No single message has every word, but this session was still ranked here for a
-            # reason. Showing the closest lines beats a blank card that reads as "your best
-            # result contains nothing you searched for".
-            head = f"● {len(matches)} partial · best message has {best} of {len(keys)} words"
-        else:
-            head = "● matched on title or first prompt, not in any message"
-        print(f"\n\033[1;33m{head}\033[0m")
-
-        for r, sub in matches[:6]:
-            tag = "\033[35m⤷\033[0m" if sub else " "
-            print(f"{tag}{_label(r[4], source)} {_snippet(r[7], keys, 200)}")
-        if len(matches) > 6:
-            print(f"  \033[2m… {len(matches) - 6} more (resume to read)\033[0m")
-        if not matches:
-            bookends()
-    else:
-        # No query yet: just the bookends so you know what the session was about.
-        bookends()
+    body = _preview_lines(tagged, keys, source)
+    if body:
+        print()
+        print("\n".join(body))
 
 
 # ------------------------------------------------------------------ resume
