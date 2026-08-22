@@ -1,13 +1,13 @@
 <h1 align="center">agsearch</h1>
 
 <p align="center">
-  <strong><code>/resume</code> searches session titles.<br>
-  agsearch searches what was said inside them.</strong>
+  <strong>Find the session you remember,<br>
+  even when you don't remember its title.</strong>
 </p>
 
 <p align="center">
   Ranked full-text search across every <strong>Claude Code</strong> and
-  <strong>OpenAI Codex</strong> session on your machine.
+  <strong>Codex CLI</strong> session on your machine.
 </p>
 
 <p align="center">
@@ -180,7 +180,8 @@ deliberate future step, not more matching heuristics.
 
 - Walks `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/*.jsonl`, extracting user
   prompts and assistant text (one row per message) plus each session's AI-generated title.
-  A source-adapter layer means new agents (Cursor, Gemini, …) are just another parser.
+  A source-adapter layer means new agents (Gemini CLI, Cursor, …) slot in without touching
+  search or ranking.
 - Caches parsed output per file, keyed by mtime, under `~/.cache/agsearch/`. Only changed
   sessions are re-parsed on later runs.
 - The JSONL schema is Claude Code's internal format and can change between releases; if a
