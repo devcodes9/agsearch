@@ -1295,7 +1295,14 @@ def main(argv):
     return run_fzf(lines, query, thinking=thinking, no_resume=no_resume, fuzzy=fuzzy)
 
 
-if __name__ == "__main__":
+def _entry():
+    """Console-script entry point.
+
+    A [project.scripts] entry point is called with no arguments, while main()
+    takes argv — so the two cannot be wired directly. This wrapper is what
+    `pipx`/`uvx`/`pip install agsearch` invoke, and running the file directly
+    goes through it too, so both paths share one error-handling path.
+    """
     try:
         sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
@@ -1305,3 +1312,7 @@ if __name__ == "__main__":
     except Exception:                       # never let the popup vanish without a reason
         import traceback
         _die("agsearch crashed:\n\n" + traceback.format_exc())
+
+
+if __name__ == "__main__":
+    _entry()
