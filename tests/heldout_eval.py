@@ -7,6 +7,8 @@ Set 2 is derived from the corpus itself: take content words out of a session's o
 require that session back. It covers 300 sessions instead of 15 and nobody tuned against it,
 so a change that helps set 1 while flat or down on set 2 is a change fitted to the labels.
 
+Set 2 draws its targets from `cli` sessions only. See heldout_queries().
+
 The timing column matters as much as the quality columns: fzf re-ranks on every keystroke, so
 a variant that buys accuracy at 5x the latency is not shippable.
 """
@@ -22,12 +24,23 @@ def load(path, name):
 def heldout_queries(ag, rows, seed=7, n=300):
     """Pick content words from a session's own title. If you typed words from the title,
     that session should come back. Titles are not what the ranker mainly scores (body is),
-    so this is a fair proxy, and it covers 300 sessions instead of 15."""
+    so this is a fair proxy, and it covers 300 sessions instead of 15.
+
+    Targets are `cli` sessions only. rank_sessions sorts every `auto` session below every
+    `cli` one, so an `auto` target cannot reach rank 1 while any `cli` session matches at
+    all. That is deliberate: agsearch is for finding a session you remember being in, and
+    nobody remembers an SDK-spawned run they never saw. Asking for one back is not a hard
+    query, it is the wrong question, and on a corpus that is mostly `auto` it caps @1 far
+    below 1.0 and leaves too little headroom for a real ranking change to show up.
+
+    `auto` sessions stay in `rows`, so they still compete as distractors."""
     rnd = random.Random(seed)
     pool = []
     for r in rows:
         title = r[ag.C_TITLE]
         if title.startswith("<command-message>"):    # slash-command invocations, not conversations
+            continue
+        if r[ag.C_KIND] == "auto":                   # never a valid target; see docstring
             continue
         words = [w for w in ag.parse_query(title)]
         if len(words) < 2:
