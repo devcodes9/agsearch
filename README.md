@@ -73,7 +73,7 @@ pipx install agsearch
 The interactive interface needs [`fzf`](https://github.com/junegunn/fzf#installation) **0.35 or
 newer** — that is the release which added the `start` event agsearch binds. Some distributions
 package an older one; `fzf`'s own install script is the fallback. Without fzf,
-`agsearch -n "query"` still prints ranked matches.
+`agsearch -n "query"` still prints ranked sessions.
 
 ### Install script
 
@@ -91,7 +91,8 @@ agsearch requires Python 3.9 or newer and has no Python package dependencies.
 ```sh
 agsearch                       # browse all sessions in the interactive interface
 agsearch "stripe tax id"       # open with an initial query
-agsearch -n "stripe tax id"    # print ranked matches without fzf
+agsearch -n "stripe tax id"    # print ranked sessions as plain text, no fzf
+agsearch read <session-id>     # print a whole session, without resuming it
 agsearch --here "webhook"      # search only the current project
 agsearch -p myapp "migration"  # search projects whose path contains "myapp"
 agsearch --thinking "query"    # include assistant thinking blocks
@@ -99,6 +100,19 @@ agsearch --no-resume "query"   # print the selected resume command
 agsearch --reindex             # rebuild the transcript cache
 agsearch --version             # print the installed version
 ```
+
+### Scripts and coding agents
+
+`-n` prints one entry per session as plain text, led by the session id, and drops colour
+whenever it is not writing to a terminal. That makes the search loop scriptable:
+
+```sh
+agsearch -n "webhook retry backoff"        # ranked sessions, one entry each
+agsearch read 3f2a1c4e-...                 # the whole conversation, no resume, no tokens
+```
+
+Ranking is the same as the interactive list, so a term you half-remember or mistype finds
+the same session either way.
 
 ### Interactive keys
 

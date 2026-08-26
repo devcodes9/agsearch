@@ -11,8 +11,26 @@ migration in the same line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`-n` now runs the same ranker as the interactive list.** It was a separate path: an
+  AND of raw substrings over *message* rows, sorted by date. That meant no BM25, no
+  stemming, no typo tier, no demotion of SDK-spawned runs, and one session repeated once
+  per matching message. `-n` is also the README's zero-install first command and the
+  fallback when fzf is missing, so the surface most new users met was the unranked one.
+  It now returns ranked sessions, one entry each. Output shape changed with it: the
+  session id leads the line, and the matching text sits indented below it. Cost of the
+  shared path is ~0.7s per `-n` run against a 400-session corpus, up from ~0.25s,
+  because it builds the same per-session index the list uses.
+
 ### Added
 
+- **`agsearch read <session-id>`** prints a whole conversation without resuming it. This
+  was already there as the TUI's <kbd>Ctrl-O</kbd>, reachable only as an internal
+  subcommand; it is now a documented command, so a search hit can actually be opened.
+- **Colour only when a terminal is reading.** `-n` and `read` emit plain text when stdout
+  is a pipe, or when `NO_COLOR` is set. Escape sequences quoted inside a transcript are
+  stripped too, including ones the snippet cut in half.
 - **Forked sessions are marked `fork`** ahead of the title, in the list and in the preview
   and `read` headers alike, and those headers also name the branch a fork came from and
   the message the two split at. Claude Code forks a

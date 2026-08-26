@@ -38,27 +38,16 @@ class AgentTagTests(unittest.TestCase):
         self.assertEqual(ag._agent_tag(None), "cc")
 
 
-class FmtRowTests(unittest.TestCase):
-    def test_assistant_row_is_named_after_the_source(self):
-        self.assertIn("cx ", strip(ag.fmt_row(row("assistant", "the reply"), (), "codex")))
-        self.assertIn("cc ", strip(ag.fmt_row(row("assistant", "the reply"), (), "cc")))
-
-    def test_source_only_renames_the_agent_side(self):
-        for source in ("cc", "codex"):
-            self.assertIn("you", strip(ag.fmt_row(row("user", "the ask"), (), source)))
-            self.assertIn("th ", strip(ag.fmt_row(row("thinking", "musing"), (), source)))
-
-    def test_defaults_to_claude_when_no_source_is_passed(self):
-        self.assertIn("cc ", strip(ag.fmt_row(row("assistant", "the reply"))))
-
-
 class LabelTests(unittest.TestCase):
     """The preview names the agent in the turn gutter, so these assert the
     rendered gutter rather than a label helper. The list and `-n` paths keep the
-    two-character `cc`/`cx` form; only the preview spells the agent out."""
+    two-character `cc`/`cx` form; only the preview spells the agent out.
+
+    `-n` lists sessions rather than messages, so it has no per-turn role to name; its `cc`/`cx`
+    comes from the session's source via _agent_tag, covered by AgentTagTests above."""
 
     def _gutter(self, source):
-        # _preview_lines takes split rows, not the SEP-joined strings fmt_row takes.
+        # _preview_lines takes split rows, not the SEP-joined strings row() builds.
         turns = [(row("user", "the ask").split(ag.SEP), False),
                  (row("assistant", "the reply").split(ag.SEP), False)]
         return "\n".join(strip(l) for l in ag._preview_lines(turns, [], source))
