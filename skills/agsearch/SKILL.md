@@ -29,8 +29,8 @@ Pass the user's own vocabulary. Inflections and typos are handled, so `migration
 Each hit is one session: id, date, agent, matched/total terms, project, title, then the line
 that matched underneath.
 
-The top hit is the right session roughly three times in four. Read the matched line before
-trusting it, and say which session you are answering from.
+The top hit is usually the right session, not always. Read the matched line before trusting
+it, and name the session you are answering from so the user can check you.
 
 **Too many hits.** Add a content word. Narrowing beats paging: the output caps and reports how
 many it withheld.
