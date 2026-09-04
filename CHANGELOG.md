@@ -13,6 +13,18 @@ migration in the same line.
 
 ### Changed
 
+- **Piped output is shaped for the program reading it.** `-n` and `read` are what a coding
+  agent sees, and an agent pays per character for what a terminal gets free. Behind the same
+  not-a-terminal test the colour seam already uses: session ids shorten to the shortest prefix
+  that still tells every indexed session apart (git's rule, floored at 12 because Codex writes
+  time-ordered uuidv7 and 8 characters collide), column padding is dropped, and the output ends
+  by naming `agsearch read`. A 20-result search goes from 5748 to 5111 bytes, and further in
+  tokens. `read` accepts any unambiguous id prefix and reports how many sessions an ambiguous
+  one matched. A terminal sees exactly what it saw before.
+- **A piped `read` caps at 12k characters**, keeping the opening turns and as many closing ones
+  as fit, because a session is read to learn what the work was and where it stopped. The
+  elision names what it dropped and how to get it. `--full`, and any terminal, is uncapped.
+
 - **`-n` now runs the same ranker as the interactive list.** It was a separate path: an
   AND of raw substrings over *message* rows, sorted by date. That meant no BM25, no
   stemming, no typo tier, no demotion of SDK-spawned runs, and one session repeated once
