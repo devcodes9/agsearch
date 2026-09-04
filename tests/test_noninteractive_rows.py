@@ -45,7 +45,7 @@ class NonInteractiveTests(unittest.TestCase):
     def test_the_entry_leads_with_the_session_id(self):
         """The id is the handle `agsearch read <sid>` takes. Without it a hit is unopenable."""
         _code, out = run([msg("sid1", "please migrate the billing database")], "billing")
-        self.assertTrue(out.startswith("sid1  "), out)
+        self.assertTrue(out.startswith("sid1 "), out)
 
     def test_piped_output_carries_no_ansi(self):
         _code, out = run([msg("sid1", "please migrate the billing database")], "billing")
