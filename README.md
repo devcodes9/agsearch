@@ -49,6 +49,8 @@ uvx agsearch -n "stripe tax id"
 - **Ranked results.** BM25 ranking favors focused sessions and shows matching lines in context.
 - **Preview, read, or resume.** Inspect a match, open the transcript in a pager, or return to the
   original session.
+- **Your agent can search too.** A one-command Claude Code skill, so Claude finds the earlier
+  conversation itself instead of answering that it has no record of it.
 - **Fully local.** No uploads, API keys, hosted index, or network calls.
 - **Fast warm searches.** A per-file cache reparses only transcripts that changed.
 
@@ -99,6 +101,7 @@ agsearch --thinking "query"    # include assistant thinking blocks
 agsearch --no-resume "query"   # print the selected resume command
 agsearch --reindex             # rebuild the transcript cache
 agsearch --version             # print the installed version
+agsearch --install-skill       # install the Claude Code skill
 ```
 
 ### Scripts and coding agents
@@ -112,7 +115,32 @@ agsearch read 3f2a1c4e-...                 # the whole conversation, no resume, 
 ```
 
 Ranking is the same as the interactive list, so a term you half-remember or mistype finds
-the same session either way.
+the same session either way. Piped, the session ids shorten to a unique prefix, the columns
+lose their padding, and `read` prints the start and end of a long session rather than all of
+it. A terminal sees none of that.
+
+### Let Claude search for you
+
+The curl installer sets this up. Homebrew and uv users run it once:
+
+```sh
+agsearch --install-skill
+```
+
+That writes a skill to `~/.claude/skills/agsearch/`. From the next session on, Claude searches
+your transcripts itself when you refer to work from an earlier conversation:
+
+> **you:** what did we decide about the webhook retry backoff?
+>
+> **Claude:** *runs `agsearch -n "webhook retry backoff"`, reads the top hit, answers from it*
+
+It also covers handoff, which resuming cannot do. `claude --resume` moves you back into the old
+session in its own directory; the skill carries that session's context forward into the one you
+are in now, so you can pick the work up in a different repository or on a different branch.
+
+The skill is [a single markdown file](https://github.com/devcodes9/agsearch/blob/main/skills/agsearch/SKILL.md).
+Read it before you install it, and edit your copy freely: upgrades leave an edited skill alone
+and tell you it is stale.
 
 ### Interactive keys
 

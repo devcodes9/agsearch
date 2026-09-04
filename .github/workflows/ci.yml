@@ -47,6 +47,12 @@ jobs:
         run: |
           "$RUNNER_TEMP/bin/agsearch" --version
           "$RUNNER_TEMP/bin/agsearch" --help >/dev/null
+      - name: The install carried the skill
+        # The skill is the agent-facing half of the product, so a curl install that
+        # silently skips it is a broken install, not a cosmetic miss.
+        run: |
+          test -f "$HOME/.claude/skills/agsearch/SKILL.md"
+          head -n 1 "$HOME/.claude/skills/agsearch/SKILL.md" | grep -q '^---$'
       - name: Search an empty corpus without crashing
         run: |
           # No ~/.claude or ~/.codex on a runner: exit 1 with a message is the

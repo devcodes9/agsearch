@@ -37,6 +37,15 @@ migration in the same line.
 
 ### Added
 
+- **A Claude Code skill, installed with `agsearch --install-skill`** (and by the curl installer,
+  unless `AGSEARCH_SKILL=0`). With it Claude searches your transcripts itself when you refer to
+  earlier work, rather than answering that it has no record of the conversation, and it can
+  carry an old session's context forward into the one you are in now, which resuming cannot do.
+  The skill teaches query construction because that is where an agent fails: on a 247-query
+  benchmark, content words alone rank the right session first 49% of the time, and the same
+  words left inside the question that carried them score 10% to 22%. An installed skill you
+  have edited is never overwritten without `--force`.
+
 - **`agsearch read <session-id>`** prints a whole conversation without resuming it. This
   was already there as the TUI's <kbd>Ctrl-O</kbd>, reachable only as an internal
   subcommand; it is now a documented command, so a search hit can actually be opened.
