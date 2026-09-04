@@ -11,6 +11,17 @@ migration in the same line.
 
 ## [Unreleased]
 
+### Added
+
+- **Forked sessions are marked `fork`** in the list, and the preview and `read` headers
+  name the branch they came from and the message they split at. Claude Code forks a
+  conversation by copying the transcript into a new file under a new session id and
+  records nothing that says so, so the two branches sat in the list as unrelated rows
+  with the same title, the same project and the same opening prompt. Picking the wrong
+  one resumes a branch missing everything after the split. Detection reads the only
+  trace the format leaves: copied messages keep the uuids they had in the original.
+  Claude Code sessions only, and it costs one extra partial read per new transcript.
+
 ## [0.1.1] - 2026-08-22
 
 Documentation and messaging. No behaviour change.
