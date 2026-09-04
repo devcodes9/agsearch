@@ -11,16 +11,14 @@ class PreviewStemTests(unittest.TestCase):
         self.assertEqual(keys, ["migrat"])
         self.assertTrue(all(k in "please migrate the database".lower() for k in keys))
 
-    def test_n_mode_keeps_raw_substring_and(self):
+    def test_n_mode_stems_too_because_it_shares_the_ranker(self):
+        """`-n` used to be an AND of raw substrings, so "how migration" found nothing in a
+        session that says "migrate". It runs rank_sessions now, the same as the list."""
         ag = load_agsearch()
-        line = ag.SEP.join([
-            "sid1", "/repo", "main", "2026-08-19T00:00:00", "user", "0",
-            "Migration", "please migrate the database",
-        ])
-        hits = ag.rank_matches([line], "how migration")
-        self.assertEqual(hits, [])
-        hits = ag.rank_matches([line], "migrate")
-        self.assertEqual(len(hits), 1)
+        row = ["sid1", "/repo", "2026-08-19", "cc", "cli", "Migration",
+               "please migrate the database", "please migrate the database"]
+        self.assertEqual(len(ag.rank_sessions([row], ag.parse_query("how migration"))), 1)
+        self.assertEqual(len(ag.rank_sessions([row], ag.parse_query("migrate"))), 1)
 
     def test_preview_stem_keys_match_migrate_body(self):
         ag = load_agsearch()

@@ -10,13 +10,18 @@ drops you straight back into the session with `claude --resume` or `codex resume
 Usage:
     agsearch                       # interactive fuzzy TUI (needs fzf)
     agsearch "stripe tax id"       # open the TUI pre-filtered to this query
-    agsearch -n "stripe tax id"    # non-interactive: print ranked matches, no fzf
+    agsearch -n "stripe tax id"    # non-interactive: ranked sessions as plain text, no fzf
+    agsearch read <session-id>     # print a whole session, without resuming it
     agsearch --here "..."          # only sessions from the current directory's project
     agsearch --project myapp       # only sessions whose path matches 'myapp'
     agsearch --thinking            # also index assistant thinking blocks
     agsearch --reindex             # force a full rebuild of the cache
     agsearch --version             # print the installed version and exit
     agsearch _preview <sid> <seq> <thinking> <query...>   # (internal) fzf preview
+
+`-n` prints one entry per session, led by its session id, and drops colour when it is
+not writing to a terminal — so a script or a coding agent can search, then read a hit
+with `agsearch read <session-id>`.
 
 In the TUI the right pane previews the matched session, auto-scrolled to your match
 (marked ▶) with a "match N of M" header. Enter resumes the session (and copies your
@@ -423,6 +428,25 @@ class _IndexProgress:
         self._width = 0
 
 
+# Any CSI sequence, not just the colours we emit: transcripts quote terminal output, so a
+# message can carry escapes of its own, and a program reading this wants none of them.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\[?")   # trailing alt: a code the snippet cut in half
+
+
+def _use_color():
+    """Colour is for a human at a terminal. A pipe (an agent, a script, a test) wants text.
+
+    The TUI paths never ask: fzf reads the escapes itself, and its preview and pager are pipes.
+    """
+    return _isatty(sys.stdout) and not os.environ.get("NO_COLOR")
+
+
+def _emit(text, color=None):
+    """Print a rendered block, dropping ANSI unless colour is wanted (auto-detect by default)."""
+    sys.stdout.write(text if (_use_color() if color is None else color)
+                     else _ANSI_RE.sub("", text))
+
+
 def _isatty(stream):
     try:
         return bool(stream.isatty())
@@ -533,14 +557,6 @@ def apply_scope(lines, here=False, project=None):
     return lines
 
 
-def rank_matches(lines, query):
-    """AND-of-terms substring filter, ranked by recency (iso date desc)."""
-    terms = [t.lower() for t in query.split()]
-    hits = [l for l in lines if all(t in l.lower() for t in terms)]
-    hits.sort(key=lambda l: l.split(SEP)[3], reverse=True)
-    return hits
-
-
 # ------------------------------------------------------------------ rendering
 
 def short_proj(cwd):
@@ -559,7 +575,7 @@ def _highlight(text, terms, code="\033[1;30;43m"):
     return text
 
 
-ROW_TEXT_WIDTH = 160        # keeps -n rows one terminal line each, however big the message was
+ROW_TEXT_WIDTH = 160        # the "why it matched" line under a result, however big the message was
 
 
 def _agent_tag(source):
@@ -571,36 +587,56 @@ def _agent_tag(source):
     return "cx" if source == "codex" else "cc"
 
 
-def _source_map():
-    """sid -> source, from the index build_index() writes. Missing/unreadable reads as Claude,
-    which is what the rest of the tool defaults to."""
-    try:
-        index = json.load(open(INDEX_PATH))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return {sid: info.get("source", "cc") for sid, info in index.items()}
+def _match_entry(f, matched, total, texts, keys):
+    """One result: the session's fields on one line, then the line that matched, indented.
+
+    The session id leads because it is the only field another program needs — it is the handle
+    `agsearch read <sid>` takes.
+    """
+    tag = "auto" if f[C_KIND] == "auto" else _agent_tag(f[C_SOURCE])
+    badge = f"{matched}/{total}" if total else ""
+    head = (f"{f[C_SID]}  {f[C_DATE]}  {tag:<4} {badge:<4} "
+            f"\033[36m{short_proj(f[C_CWD])[:20]:<20}\033[0m  {f[C_TITLE][:60]}")
+    idx = best_matching(texts, keys)[0] if (keys and texts) else ()
+    # Matched on the title alone (or no query at all): show what the session opened with.
+    body = texts[idx[0]] if idx else f[C_FIRST]
+    return head + "\n    " + _snippet(body, keys, ROW_TEXT_WIDTH)
 
 
-def fmt_row(l, terms=(), source="cc"):
-    f = (l.split(SEP) + [""] * 8)[:8]
-    sid, cwd, branch, ts, role, seq, title, text = f
-    tag = {"user": "you", "assistant": _agent_tag(source), "thinking": "th"}.get(role, role)
-    body = _snippet(text, [t for t in terms if t], ROW_TEXT_WIDTH)
-    return f"{ts[:10]}  {short_proj(cwd)[:18]:<18}  {tag:<3} {title[:32]:<32} │ {body}"
+def print_matches(lines, query, limit=20):
+    """Non-interactive results: the same ranked sessions the TUI lists, one entry each.
 
-
-def print_matches(lines, query, limit=40):
-    hits = rank_matches(lines, query) if query else lines
+    This is the surface a pipe reads — an agent, a script, an install without fzf — so it runs
+    the same rank_sessions the list does instead of a filter of its own. It used to be an
+    AND-of-substrings sorted by date over *message* rows, which meant no BM25, no stemming, no
+    typo tier, no demotion of automation, and one session repeated once per matching message.
+    """
+    rows = build_sessions(lines)
+    if not rows:
+        print("No indexed sessions found.", file=sys.stderr)
+        return 1
+    qterms = parse_query(query) if query.strip() else []
+    if qterms:
+        hits = [(m, f) for _score, m, f in rank_sessions(rows, qterms, _usage_counts())]
+    else:                              # no query: newest first, yours ahead of automation
+        rows.sort(key=lambda f: f[C_DATE], reverse=True)
+        rows.sort(key=lambda f: f[C_KIND] == "auto")
+        hits = [(0, f) for f in rows]
     if not hits:
         print("No matches.", file=sys.stderr)
         return 1
-    terms = [t.lower() for t in query.split()]
-    sources = _source_map()
-    for l in hits[:limit]:
-        print(fmt_row(l, terms, sources.get(l.split(SEP, 1)[0], "cc")))
+
+    keys = query_keys(qterms)
+    texts = {}
+    for l in lines:                    # sid -> its messages, for the "why it matched" line
+        f = l.split(SEP)
+        texts.setdefault(f[0], []).append(f[7])
+    _emit("\n".join(_match_entry(f, m, len(qterms), texts.get(f[C_SID], []), keys)
+                    for m, f in hits[:limit]) + "\n")
     extra = len(hits) - limit
     if extra > 0:
-        print(f"... and {extra} more (narrow the query or use the fzf TUI).", file=sys.stderr)
+        print(f"... and {extra} more (narrow the query, or run agsearch for the TUI).",
+              file=sys.stderr)
     return 0
 
 
@@ -916,7 +952,7 @@ def resume_line(sid, cwd):
     return resume_command(target or cwd, argv)
 
 
-def render_transcript(sid, thinking="0", query=""):
+def render_transcript(sid, thinking="0", query="", color=None):
     """The whole conversation, readable, without resuming it.
 
     Resuming to read costs a CLI start, a context load, and a session you then
@@ -927,25 +963,27 @@ def render_transcript(sid, thinking="0", query=""):
     # Full text, not the index cap: this view exists to be read.
     source, tagged = load_session_rows(sid, _flag(thinking), limit=100_000)
     if not tagged:
-        print("(session not found)")
-        return
+        print("(session not found)")      # stdout: the TUI reads this through a pager
+        return 1
     rows = [r for r, _ in tagged]
     keys = query_keys(parse_query(query)) if query.strip() else []
 
     r0 = rows[0]
     title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
     n_sub = sum(1 for _, sub in tagged if sub)
-    print(fork_mark(sid) + f"\033[1m{title[:80]}\033[0m")
-    print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
-          + (f" · {n_sub} subagent" if n_sub else "") + fork_line(sid) + "\033[0m")
-    print(f"\033[2m{resume_line(sid, r0[1])}\033[0m\n")
+    out = [fork_mark(sid) + f"\033[1m{title[:80]}\033[0m",
+           f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
+           + (f" · {n_sub} subagent" if n_sub else "") + fork_line(sid) + "\033[0m",
+           f"\033[2m{resume_line(sid, r0[1])}\033[0m\n"]
 
     for r, sub in tagged:
         hit = bool(keys) and all(k in r[7].lower() for k in keys)
         mark = "\033[1;33m▶\033[0m " if hit else "  "
-        print(mark + _turn_header(r[4], source, sub))
-        print(f"\033[2m{r[3][11:16]}\033[0m  " + _snippet(r[7], keys, 100_000))
-        print()
+        out.append(mark + _turn_header(r[4], source, sub))
+        out.append(f"\033[2m{r[3][11:16]}\033[0m  " + _snippet(r[7], keys, 100_000))
+        out.append("")
+    _emit("\n".join(out) + "\n", color)
+    return 0
 
 
 def render_preview(sid, thinking, query):
@@ -1186,10 +1224,10 @@ def build_sessions(lines):
         # Stored lowercased: ranking is the only reader, and it would otherwise re-lower the
         # whole corpus on every keystroke. Nothing displays this column.
         blob = _single_line(" · ".join(s["texts"]), 2_000_000).lower()
-        out.append(SEP.join([s["sid"], s["cwd"], s["date"][:10], source, s["kind"],
-                             title, first, blob]))
-    with open(SESSIONS_PATH, "w") as fh:
-        fh.write("\n".join(out))
+        out.append([s["sid"], s["cwd"], s["date"][:10], source, s["kind"], title, first, blob])
+    with open(SESSIONS_PATH, "w") as fh:                 # what _filter reads, one line each
+        fh.write("\n".join(SEP.join(r) for r in out))
+    return out
 
 
 # Common words that add noise, not signal, to a search ("migration OF the database").
@@ -1560,10 +1598,15 @@ def main(argv):
     if argv and argv[0] == "_filter":
         cmd_filter(argv[1:])
         return 0
-    if argv and argv[0] == "_transcript":
+    if argv and argv[0] == "_transcript":    # fzf ctrl-o, piped to a pager: keep the colour
         render_transcript(argv[1] if len(argv) > 1 else "",
-                          argv[2] if len(argv) > 2 else "0", " ".join(argv[3:]))
+                          argv[2] if len(argv) > 2 else "0", " ".join(argv[3:]), color=True)
         return 0
+    if argv and argv[0] == "read":
+        if len(argv) < 2 or not argv[1].strip():
+            print("usage: agsearch read <session-id> [query]", file=sys.stderr)
+            return 1
+        return render_transcript(argv[1], "0", " ".join(argv[2:]))
     if argv and argv[0] == "_copy":
         sid = argv[1] if len(argv) > 1 else ""
         cwd = argv[2] if len(argv) > 2 else ""
