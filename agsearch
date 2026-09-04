@@ -847,8 +847,18 @@ def _flag(v):
     return str(v).lower() in ("1", "true")
 
 
+def fork_mark(sid):
+    """The flag a fork puts ahead of its title, in a preview or a read.
+
+    Same word in the same place as the list row the session was selected from. Carrying the
+    fact only on the meta line put it in a different position in each view, and last on a line
+    that leads with the project and the date, which is the wrong end for a flag.
+    """
+    return _FORK_MARK if sid in load_forks() else ""
+
+
 def fork_line(sid):
-    """The one clause a fork adds to a session's header: what it came from, and where it split.
+    """The clause under that flag: which branch it came from, and where the two split.
 
     The original's id is spelled short because this sits inside a line that must not wrap; the
     prefix is enough to find it in the list, which is the only thing you want it for.
@@ -925,7 +935,7 @@ def render_transcript(sid, thinking="0", query=""):
     r0 = rows[0]
     title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
     n_sub = sum(1 for _, sub in tagged if sub)
-    print(f"\033[1m{title[:80]}\033[0m")
+    print(fork_mark(sid) + f"\033[1m{title[:80]}\033[0m")
     print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
           + (f" · {n_sub} subagent" if n_sub else "") + fork_line(sid) + "\033[0m")
     print(f"\033[2m{resume_line(sid, r0[1])}\033[0m\n")
@@ -957,10 +967,8 @@ def render_preview(sid, thinking, query):
     r0 = rows[0]
     n_sub = sum(1 for _, sub in tagged if sub)
     disp_title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
-    print(f"\033[1m{disp_title[:80]}\033[0m")
+    print(fork_mark(sid) + f"\033[1m{disp_title[:80]}\033[0m")
     gone = " · orig dir gone" if r0[1] and not os.path.isdir(r0[1]) else ""
-    # Appended to the existing line rather than given one of its own: HEADER_LINES is what the
-    # preview's scroll-to-match offset is computed from, so the header has to stay five lines.
     print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
           + (f" · {n_sub} subagent" if n_sub else "") + gone + fork_line(sid) + "\033[0m")
 

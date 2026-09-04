@@ -125,6 +125,18 @@ class ForkDisplayTests(unittest.TestCase):
         row = self._row(True)
         self.assertLess(row.index("fork"), row.index("Some title"))
 
+    def test_the_header_flags_the_fork_ahead_of_the_title(self):
+        """Same word in the same place as the list row it was selected from."""
+        with tempfile.TemporaryDirectory() as d:
+            forks_path = ag.FORKS_PATH
+            ag.FORKS_PATH = os.path.join(d, "forks.json")
+            try:
+                json.dump({"kid": {"of": "0f21fa0f", "at": 41}}, open(ag.FORKS_PATH, "w"))
+                self.assertEqual(strip(ag.fork_mark("kid")), "fork ")
+                self.assertEqual(ag.fork_mark("someone-else"), "")
+            finally:
+                ag.FORKS_PATH = forks_path
+
     def test_the_header_clause_names_the_original_and_the_split(self):
         with tempfile.TemporaryDirectory() as d:
             forks_path = ag.FORKS_PATH
