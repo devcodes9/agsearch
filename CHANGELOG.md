@@ -13,7 +13,7 @@ migration in the same line.
 
 ### Added
 
-- **Forked sessions are marked `fork`** in the list, and the preview and `read` headers
+- **Forked sessions are marked `fork`** ahead of the title in the list, and the preview and `read` headers
   name the branch they came from and the message they split at. Claude Code forks a
   conversation by copying the transcript into a new file under a new session id and
   records nothing that says so, so the two branches sat in the list as unrelated rows

@@ -1218,8 +1218,12 @@ _LIVE_MARK = "\033[1;31m●\033[0m "           # session still being written to 
 # Informational only: the session still resumes (from the nearest surviving ancestor dir),
 # so this is muted enough to read as a footnote rather than a warning.
 _GONE_MARK = "  \033[2morig dir gone\033[0m"
-# Same register as the marker above: a fork is a fact about the row, not a problem with it.
-_FORK_MARK = "  \033[2mfork\033[0m"
+# Leads the title rather than trailing it. The list pane is a fraction of the terminal, so
+# anything parked after the title is the first thing truncated away — exactly on the rows that
+# need it, since a fork carries the same long title as the session it was forked from. Leading
+# it costs nothing on the other 99% of rows, and every title starts in the same column, so the
+# marks still line up to be scanned. A word, not a glyph: ⑂ and ⋔ are unreadable at 14px.
+_FORK_MARK = "\033[2mfork\033[0m "
 
 
 def _active_sids(sids):
@@ -1260,12 +1264,13 @@ def _row(sid, cwd, date, source, kind, title, badge, active=False, dir_gone=Fals
          forked=False):
     mark = _AUTO_MARK if kind == "auto" else _SRC_MARK.get(source, "    ")
     live = _LIVE_MARK if active else "  "
-    tail = (_FORK_MARK if forked else "") + (_GONE_MARK if dir_gone else "")
+    forkm = _FORK_MARK if forked else ""
+    tail = _GONE_MARK if dir_gone else ""
     body = (f"{date}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  "
-            f"{badge} {live}{title[:64]}{tail}")
+            f"{badge} {live}{forkm}{title[:64]}{tail}")
     if kind == "auto":
         body = (f"\033[2m{date}  \033[0m{_AUTO_MARK}\033[2m  {short_proj(cwd)[:15]:<15}  "
-                f"{badge} \033[0m{live}\033[2m{title[:64]}\033[0m{tail}")
+                f"{badge} \033[0m{live}{forkm}\033[2m{title[:64]}\033[0m{tail}")
     return SEP.join([sid, cwd, body, "1" if active else "0"])
 
 

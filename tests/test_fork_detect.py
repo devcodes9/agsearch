@@ -115,6 +115,16 @@ class ForkDisplayTests(unittest.TestCase):
         self.assertIn("fork", self._row(True))
         self.assertNotIn("fork", self._row(False))
 
+    def test_the_mark_comes_before_the_title(self):
+        """The list pane is a fraction of the terminal, so anything after the title is cut.
+
+        A fork carries the same long title as the session it came from, which is exactly the
+        row where the title runs long enough to be truncated. Trailing the title, the mark was
+        invisible below a ~200 column terminal.
+        """
+        row = self._row(True)
+        self.assertLess(row.index("fork"), row.index("Some title"))
+
     def test_the_header_clause_names_the_original_and_the_split(self):
         with tempfile.TemporaryDirectory() as d:
             forks_path = ag.FORKS_PATH
