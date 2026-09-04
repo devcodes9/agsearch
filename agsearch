@@ -587,16 +587,44 @@ def _agent_tag(source):
     return "cx" if source == "codex" else "cc"
 
 
-def _match_entry(f, matched, total, texts, keys):
+AGENT_ID_MIN = 12       # git's short-hash rule; see _short_id_len for why 8 is not enough
+
+
+def _short_id_len(sids):
+    """Shortest prefix that still tells every indexed session apart, floored at AGENT_ID_MIN.
+
+    Git's rule, for the same reason: the full id is the one field a reader has to copy, and a
+    36-char uuid is the most expensive thing on the line for the one consumer that pays per
+    character. The floor is not cosmetic. Codex writes uuidv7, whose leading bytes are a
+    timestamp, so sessions recorded near each other share 8-char prefixes: on a 741-session
+    corpus 8 collided 36 times and 12 collided none.
+    """
+    uniq = set(sids)
+    for n in (13, 18, 23, 36):          # uuid group boundaries: a cut mid-group reads as noise
+        if n >= AGENT_ID_MIN and len({s[:n] for s in uniq}) == len(uniq):
+            return n
+    return 36
+
+
+def _match_entry(f, matched, total, texts, keys, idlen=36, pad=True):
     """One result: the session's fields on one line, then the line that matched, indented.
 
     The session id leads because it is the only field another program needs — it is the handle
     `agsearch read <sid>` takes.
+
+    A terminal gets padded columns because eyes track a ragged left edge badly. A pipe gets
+    neither the padding nor the full id: alignment buys an agent nothing and every run of
+    spaces costs it a token.
     """
     tag = "auto" if f[C_KIND] == "auto" else _agent_tag(f[C_SOURCE])
     badge = f"{matched}/{total}" if total else ""
-    head = (f"{f[C_SID]}  {f[C_DATE]}  {tag:<4} {badge:<4} "
-            f"\033[36m{short_proj(f[C_CWD])[:20]:<20}\033[0m  {f[C_TITLE][:60]}")
+    proj = short_proj(f[C_CWD])[:20]
+    if pad:
+        head = (f"{f[C_SID]}  {f[C_DATE]}  {tag:<4} {badge:<4} "
+                f"\033[36m{proj:<20}\033[0m  {f[C_TITLE][:60]}")
+    else:
+        head = (f"{f[C_SID][:idlen]} {f[C_DATE]} {tag} {badge} "
+                f"\033[36m{proj}\033[0m {f[C_TITLE][:60]}")
     idx = best_matching(texts, keys)[0] if (keys and texts) else ()
     # Matched on the title alone (or no query at all): show what the session opened with.
     body = texts[idx[0]] if idx else f[C_FIRST]
@@ -631,13 +659,44 @@ def print_matches(lines, query, limit=20):
     for l in lines:                    # sid -> its messages, for the "why it matched" line
         f = l.split(SEP)
         texts.setdefault(f[0], []).append(f[7])
-    _emit("\n".join(_match_entry(f, m, len(qterms), texts.get(f[C_SID], []), keys)
+    pad = _isatty(sys.stdout)
+    idlen = 36 if pad else _short_id_len([f[C_SID] for f in rows])
+    _emit("\n".join(_match_entry(f, m, len(qterms), texts.get(f[C_SID], []), keys, idlen, pad)
                     for m, f in hits[:limit]) + "\n")
     extra = len(hits) - limit
     if extra > 0:
         print(f"... and {extra} more (narrow the query, or run agsearch for the TUI).",
               file=sys.stderr)
+    if not pad:
+        # Whoever is reading this is a program, and the next thing it wants is one of these
+        # sessions. Naming the command here means it does not have to be told anywhere else.
+        print("open one: agsearch read <id>  (the id is the first field above)")
     return 0
+
+
+def resolve_sid(sid):
+    """Full session id for `sid`, which may be any unambiguous prefix of one.
+
+    `-n` prints shortened ids, so `read` has to accept what `-n` printed. Git again: a prefix
+    is a handle until it stops being unique, and then the ambiguity is worth saying out loud
+    rather than guessing at.
+
+    Returns (sid, None) or (None, message).
+    """
+    sid = (sid or "").strip()
+    try:
+        index = json.load(open(INDEX_PATH))
+    except (OSError, json.JSONDecodeError):
+        return sid, None                    # no index to check against; let the caller try
+    if sid in index:
+        return sid, None
+    hits = sorted(k for k in index if k.startswith(sid))
+    if len(hits) == 1:
+        return hits[0], None
+    if not hits:
+        return None, f"no session id starts with {sid!r}. Run a search first: agsearch -n \"...\""
+    listed = ", ".join(hits[:5]) + (" ..." if len(hits) > 5 else "")
+    return None, f"{sid!r} matches {len(hits)} sessions: {listed}. Use more characters."
 
 
 def _session_path(sid):
@@ -952,13 +1011,41 @@ def resume_line(sid, cwd):
     return resume_command(target or cwd, argv)
 
 
-def render_transcript(sid, thinking="0", query="", color=None):
+AGENT_READ_CHARS = 12_000       # what a piped `read` spends before it starts eliding
+OPENING_TURNS = 2               # kept whatever the budget: the opening states the goal
+
+
+def _elide(blocks, budget):
+    """Keep the opening turns and as many closing turns as fit, drop the middle.
+
+    A session is read to answer one of two questions: what were we doing, and where did we
+    stop. The first lives in the opening turns and the second in the closing ones, so a
+    transcript too long to print whole loses least from the middle. Returns (blocks, dropped).
+    """
+    if sum(len(b) for b in blocks) <= budget:
+        return blocks, 0
+    head = blocks[:OPENING_TURNS]
+    spent = sum(len(b) for b in head)
+    tail = []
+    for b in reversed(blocks[OPENING_TURNS:]):
+        if spent + len(b) > budget:
+            break
+        tail.insert(0, b)
+        spent += len(b)
+    return head + tail, len(blocks) - len(head) - len(tail)
+
+
+def render_transcript(sid, thinking="0", query="", color=None, budget=None):
     """The whole conversation, readable, without resuming it.
 
     Resuming to read costs a CLI start, a context load, and a session you then
     have to leave. Usually you only wanted to check this is the right session or
     lift one answer out of it. Matched turns are marked with a bar so the pager
     can jump between them.
+
+    `budget` caps the printed characters for a reader that pays for them. A terminal has a
+    scrollback and a pager and so gets the whole thing; a pipe gets the opening and the
+    ending, and a line saying what it did not get and how to ask for it.
     """
     # Full text, not the index cap: this view exists to be read.
     source, tagged = load_session_rows(sid, _flag(thinking), limit=100_000)
@@ -976,13 +1063,23 @@ def render_transcript(sid, thinking="0", query="", color=None):
            + (f" · {n_sub} subagent" if n_sub else "") + fork_line(sid) + "\033[0m",
            f"\033[2m{resume_line(sid, r0[1])}\033[0m\n"]
 
+    blocks = []
     for r, sub in tagged:
         hit = bool(keys) and all(k in r[7].lower() for k in keys)
         mark = "\033[1;33m▶\033[0m " if hit else "  "
-        out.append(mark + _turn_header(r[4], source, sub))
-        out.append(f"\033[2m{r[3][11:16]}\033[0m  " + _snippet(r[7], keys, 100_000))
-        out.append("")
-    _emit("\n".join(out) + "\n", color)
+        blocks.append(mark + _turn_header(r[4], source, sub) + "\n"
+                      + f"\033[2m{r[3][11:16]}\033[0m  " + _snippet(r[7], keys, 100_000) + "\n")
+
+    dropped = 0
+    if budget:
+        blocks, dropped = _elide(blocks, budget)
+    if dropped:
+        note = (f"[{dropped} messages elided from the middle. "
+                f"To see them, search inside this session: "
+                f'agsearch -n "<terms>" | grep {sid[:13]}, '
+                f"or read it whole: agsearch read {sid[:13]} --full]")
+        blocks.insert(OPENING_TURNS, "\033[2m" + note + "\033[0m\n")
+    _emit("\n".join(out + blocks) + "\n", color)
     return 0
 
 
@@ -1606,7 +1703,14 @@ def main(argv):
         if len(argv) < 2 or not argv[1].strip():
             print("usage: agsearch read <session-id> [query]", file=sys.stderr)
             return 1
-        return render_transcript(argv[1], "0", " ".join(argv[2:]))
+        rest = [a for a in argv[2:] if a != "--full"]
+        full = "--full" in argv[2:] or _isatty(sys.stdout)
+        sid, err = resolve_sid(argv[1])
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        return render_transcript(sid, "0", " ".join(rest),
+                                 budget=None if full else AGENT_READ_CHARS)
     if argv and argv[0] == "_copy":
         sid = argv[1] if len(argv) > 1 else ""
         cwd = argv[2] if len(argv) > 2 else ""
