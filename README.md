@@ -164,6 +164,7 @@ only changed files are reparsed.
 - SDK and other automated sessions remain searchable but rank below user-started sessions.
 - Sessions from deleted worktrees resume from the nearest existing parent directory.
 - Recently active sessions are marked `●` and require confirmation before reattaching.
+- Forked Claude Code sessions are marked `fork`, and name the branch they split from.
 
 ## Development
 
