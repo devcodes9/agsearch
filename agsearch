@@ -1711,7 +1711,7 @@ def main(argv):
         render_transcript(argv[1] if len(argv) > 1 else "",
                           argv[2] if len(argv) > 2 else "0", " ".join(argv[3:]), color=True)
         return 0
-    if argv and argv[0] in ("--install-skill", "install-skill"):
+    if argv and argv[0] == "--install-skill":
         return install_skill(force="--force" in argv[1:])
     if argv and argv[0] == "read":
         if len(argv) < 2 or not argv[1].strip():
