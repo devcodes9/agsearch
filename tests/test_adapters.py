@@ -9,6 +9,7 @@ Fixtures here are synthetic. Real transcripts are not committed.
 
 import json
 import os
+import pathlib
 import sqlite3
 import tempfile
 import unittest
@@ -62,6 +63,41 @@ class RegistryTests(unittest.TestCase):
 
     def test_unknown_source_falls_back_to_claude(self):
         self.assertIs(ag._source("harness-from-the-future"), ag.SOURCES["cc"])
+
+
+class ShippedDescriptionTests(unittest.TestCase):
+    """Every user-facing description has to name every harness agsearch indexes.
+
+    They are written out in four files, and adding the fifth harness updated three of them.
+    A reader met the marketplace listing before anything else and it still said two.
+    """
+
+    # How each source is spelled in prose, which is not always its column label.
+    PROSE = {"cc": "Claude Code", "codex": "Codex", "cursor": "Cursor",
+             "opencode": "opencode", "gemini": "Gemini"}
+
+    def described_files(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        for rel in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json"):
+            blob = json.loads((root / rel).read_text())
+            stack = [blob]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, dict):
+                    if isinstance(node.get("description"), str):
+                        yield rel, node["description"]
+                    stack.extend(node.values())
+                elif isinstance(node, list):
+                    stack.extend(node)
+
+    def test_every_harness_is_named(self):
+        self.assertEqual(set(self.PROSE), set(ag.SOURCES), "a source has no prose spelling")
+        seen = 0
+        for rel, text in self.described_files():
+            seen += 1
+            for source, prose in self.PROSE.items():
+                self.assertIn(prose, text, "%s omits %s: %r" % (rel, source, text))
+        self.assertGreaterEqual(seen, 3, "expected several descriptions to check")
 
 
 class ResumeRecipeTests(unittest.TestCase):
