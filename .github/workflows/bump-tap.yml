@@ -8,9 +8,13 @@ name: bump-tap
 # tap repo. Until that exists the job is skipped, not failed, so cutting a
 # release never blocks on tap plumbing.
 
+# Triggered by the tag, not by `release: published`. A release created by the
+# release workflow is created with GITHUB_TOKEN, and GitHub does not start
+# workflows from GITHUB_TOKEN events, so the published-release trigger never
+# fired. v0.2.0 shipped with the tap still on 0.1.1 because of it.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -41,7 +45,7 @@ jobs:
           formula-name: agsearch
           formula-path: Formula/agsearch.rb
           homebrew-tap: devcodes9/homebrew-tap
-          tag-name: ${{ github.event.inputs.tag || github.event.release.tag_name }}
-          download-url: https://github.com/devcodes9/agsearch/archive/refs/tags/${{ github.event.inputs.tag || github.event.release.tag_name }}.tar.gz
+          tag-name: ${{ github.event.inputs.tag || github.ref_name }}
+          download-url: https://github.com/devcodes9/agsearch/archive/refs/tags/${{ github.event.inputs.tag || github.ref_name }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

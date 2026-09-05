@@ -90,3 +90,16 @@ parser rather than assumed:
 3. **`-n` emits ANSI highlighting even when piped**, so the query string is not
    a contiguous substring of the output. The assertions use unhighlighted text
    (`billing/config.py`) instead.
+
+## Why v0.2.0 shipped with a stale formula
+
+Two faults, both now fixed in the workflow:
+
+- It triggered on `release: published`. The release is created by the release
+  workflow using `GITHUB_TOKEN`, and GitHub does not start workflows from
+  `GITHUB_TOKEN` events, so the job never ran. It triggers on the `v*` tag now,
+  the same as `release` and `publish-pypi`.
+- `HOMEBREW_TAP_TOKEN` is still not set, so a manual dispatch skipped rather than
+  bumped. Until that secret exists, a release needs the formula updated by hand:
+  point `url` at the new tag and replace `sha256` with
+  `shasum -a 256` of that tarball.
