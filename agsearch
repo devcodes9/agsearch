@@ -170,6 +170,12 @@ def parse_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
                 continue
             if t not in ("user", "assistant"):
                 continue
+            # Claude Code flags injected content as meta: a skill's whole SKILL.md pasted in
+            # as a user turn, hook notices, image-paste markers. It is filed under the user's
+            # role but nobody typed it, and a single skill injection runs to 15k characters,
+            # which buries the real prompt in the preview and the matched line.
+            if o.get("isMeta"):
+                continue
             session_id = o.get("sessionId") or session_id   # parent id for agent-* files
             cwd = o.get("cwd", cwd)
             branch = o.get("gitBranch", branch)

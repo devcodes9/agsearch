@@ -383,6 +383,54 @@ class SharedDatabaseTests(unittest.TestCase):
             ag.INDEX_PATH, ag.SUBMAP_PATH = old_index, old_sub
 
 
+class MetaEntryTests(unittest.TestCase):
+    """Claude Code files injected content under the user's role and flags it `isMeta`.
+
+    A skill injection is the whole SKILL.md, up to 15k characters. Indexed, it outranks and
+    then hides the sentence the human actually typed.
+    """
+
+    def parse(self, entries):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "11111111-2222-3333-4444-555555555555.jsonl")
+        with open(path, "w") as fh:
+            for e in entries:
+                fh.write(json.dumps(e) + "\n")
+        return ag.parse_session(path)
+
+    def turn(self, role, text, meta=False):
+        e = {"type": role, "sessionId": "11111111-2222-3333-4444-555555555555",
+             "cwd": "/work", "timestamp": "2026-01-01T00:00:00Z",
+             "message": {"role": role, "content": [{"type": "text", "text": text}]}}
+        if meta:
+            e["isMeta"] = True
+        return e
+
+    def test_injected_turns_are_not_indexed(self):
+        _sid, rows = self.parse([
+            self.turn("user", "Base directory for this skill: /plugins/x " + "boilerplate " * 400,
+                      meta=True),
+            self.turn("user", "why does the checksum retry twice"),
+            self.turn("assistant", "because the backoff resets"),
+        ])
+        self.assertEqual(["why does the checksum retry twice", "because the backoff resets"],
+                         [r[7] for r in rows])
+
+    def test_the_first_real_prompt_still_titles_the_session(self):
+        """The injection lands before the prompt, so indexing it takes the title too."""
+        _sid, rows = self.parse([
+            self.turn("user", "A session-scoped Stop hook is now active", meta=True),
+            self.turn("user", "fix the retry backoff"),
+        ])
+        self.assertEqual(1, len(rows))
+        self.assertEqual("fix the retry backoff", rows[0][7])
+
+    def test_ordinary_turns_are_untouched(self):
+        _sid, rows = self.parse([self.turn("user", "a"), self.turn("assistant", "b")])
+        self.assertEqual(["a", "b"], [r[7] for r in rows])
+        self.assertEqual(["0", "1"], [r[5] for r in rows])
+
+
 class DiscoveryTests(unittest.TestCase):
     def test_each_harness_matches_only_its_own_files(self):
         """The walk used to accept `.jsonl` globally, which made every non-jsonl transcript
