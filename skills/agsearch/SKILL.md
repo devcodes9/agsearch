@@ -9,15 +9,14 @@ Every Claude Code and Codex session on this machine is a transcript on disk. `ag
 searches what was said inside them and prints ranked hits. You do not remember those
 sessions. The transcripts do.
 
-## Before the first search
+## The command
 
-This skill drives the `agsearch` command. If it is not on the PATH, say so once and stop
-searching:
+Use `agsearch` from the PATH. When it is not there, this plugin ships a copy at
+`"$CLAUDE_PLUGIN_ROOT/agsearch"`. Same program either way. Resolve it once and use that for
+every command below.
 
-    agsearch is not installed. Install it with `brew install devcodes9/tap/agsearch`,
-    or run a single search with `uvx agsearch -n "..."`.
-
-Retrying, or reading the transcripts some other way, wastes turns and gets worse answers.
+If neither exists, say so and name `brew install devcodes9/tap/agsearch`, rather than
+retrying or reading the transcripts some other way.
 
 ## Build the query from content words
 

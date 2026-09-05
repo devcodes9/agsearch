@@ -49,8 +49,11 @@ class SkillTests(unittest.TestCase):
                           f"the skill teaches {flag}, the CLI has no such flag")
 
     def test_the_skill_says_what_to_do_without_the_binary(self):
-        """The plugin installs on its own, so a reader can have the skill and not the CLI."""
-        self.assertIn("not installed", self.text)
+        """The plugin installs on its own, so a reader can hold the skill without the CLI.
+
+        It ships the binary too, so the answer is to use that rather than to give up.
+        """
+        self.assertIn("CLAUDE_PLUGIN_ROOT", self.text)
         self.assertIn("brew install", self.text)
 
     def test_every_subcommand_the_skill_teaches_exists(self):
