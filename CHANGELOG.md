@@ -20,7 +20,7 @@ migration in the same line.
   object per session under `~/.gemini/tmp/`, and resumes with `gemini --session-file <path>`
   because its `--resume` takes a project-scoped index number rather than a stable id.
   opencode keeps every session in one database, so it also resumes by id
-  (`opencode run --session <id>`) but is read as a whole.
+  (`opencode --session <id>`) but is read as a whole.
   On a 852-session corpus, adding 101 Cursor sessions moved held-out ranking by +0.004, so
   existing searches are unaffected.
 - **A transcript file may now hold more than one session.** The indexer took the first row's

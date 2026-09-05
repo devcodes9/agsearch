@@ -193,7 +193,7 @@ agsearch reads:
 | Claude Code | `~/.claude/projects/**/*.jsonl` | `claude --resume <id>` |
 | Codex | `~/.codex/sessions/**/*.jsonl` | `codex resume <id>` |
 | Cursor | `~/.cursor/chats/**/store.db` | `cursor-agent --resume <id>` |
-| opencode | `~/.local/share/opencode/opencode.db` | `opencode run --session <id>` |
+| opencode | `~/.local/share/opencode/opencode.db` | `opencode --session <id>` |
 | Gemini CLI | `~/.gemini/tmp/**/chats/*.json` | `gemini --session-file <path>` |
 
 Cursor and opencode keep sessions in SQLite; agsearch opens those read-only and reads message

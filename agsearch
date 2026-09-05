@@ -10,7 +10,7 @@ resume command.
     cc  Claude Code   ~/.claude/projects        claude --resume
     cx  Codex         ~/.codex/sessions         codex resume
     cu  Cursor        ~/.cursor/chats           cursor-agent --resume
-    oc  opencode      ~/.local/share/opencode   opencode run --session
+    oc  opencode      ~/.local/share/opencode   opencode --session
     gm  Gemini CLI    ~/.gemini/tmp             gemini --session-file
 
 Usage:
@@ -567,7 +567,9 @@ SOURCES = {
     "opencode": {
         "roots": [OPENCODE_DIR], "match": _is_opencode_db, "parse": None,
         "tag": "oc", "label": "opencode", "colour": "33",
-        "resume": ("id", ["opencode", "run", "--session", "{sid}"]),
+        # `opencode run` is the non-interactive form and demands a message; the bare command
+        # opens the TUI on that session, which is what resuming means here.
+        "resume": ("id", ["opencode", "--session", "{sid}"]),
         "subagents": False, "launch_dir": False,
     },
 }

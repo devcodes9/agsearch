@@ -77,6 +77,23 @@ class ResumeRecipeTests(unittest.TestCase):
         self.assertEqual(["gemini", "--session-file", "/tmp/chats/s.json"], argv)
         self.assertNotIn("sid-1", argv)
 
+    def test_every_resume_opens_an_interactive_session(self):
+        """Each harness has a one-shot form and an interactive form, and they are not the same
+        command. `opencode run --session <id>` exits with "You must provide a message"; the
+        bare command opens the session. Pin the exact argv so a wrong form is caught here and
+        not by a user pressing enter on a result."""
+        expected = {
+            "cc":       ["claude", "--resume", "ID"],
+            "codex":    ["codex", "resume", "ID"],
+            "cursor":   ["cursor-agent", "--resume", "ID"],
+            "opencode": ["opencode", "--session", "ID"],
+            "gemini":   ["gemini", "--session-file", "PATH"],
+        }
+        self.assertEqual(set(ag.SOURCES), set(expected), "a source has no pinned resume command")
+        for source, want in expected.items():
+            _s, _b, argv, _c, _t, _e = self.plan(source, "ID", "PATH")
+            self.assertEqual(want, argv, source)
+
     def test_existing_harnesses_are_unchanged(self):
         _s, _b, argv, _c, _t, _e = self.plan("cc", "abc", "/tmp/p/abc.jsonl")
         self.assertEqual(["claude", "--resume", "abc"], argv)
