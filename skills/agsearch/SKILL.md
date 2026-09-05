@@ -1,13 +1,12 @@
 ---
 name: agsearch
-description: Search past Claude Code and Codex sessions saved on this machine. Use when the user refers to earlier work ("what did we decide about X", "we hit this error before"), asks to continue or hand off work started in another session, or when you are about to say you have no record of a conversation that happened before this one.
+description: Use when the user refers to earlier work ("what did we decide about X", "we hit this error before"), asks to continue or hand off work started in another session, or when you are about to say you have no record of a conversation that happened before this one. Searches Claude Code and Codex transcripts saved on this machine.
 ---
 
 # agsearch
 
-Every Claude Code and Codex session on this machine is a transcript on disk. `agsearch`
-searches what was said inside them and prints ranked hits. You do not remember those
-sessions. The transcripts do.
+You do not remember your past sessions. The transcripts on disk do, and `agsearch` searches
+what was said inside them.
 
 ## The command
 
@@ -16,7 +15,11 @@ Use `agsearch` from the PATH. When it is not there, this plugin ships a copy at
 every command below.
 
 If neither exists, say so and name `brew install devcodes9/tap/agsearch`, rather than
-retrying or reading the transcripts some other way.
+retrying.
+
+Never read the transcripts directly. They are JSONL with tool calls, diffs and base64
+attachments interleaved, so grepping them returns machine noise rather than anything anyone
+said.
 
 ## Build the query from content words
 
@@ -47,10 +50,6 @@ many it withheld.
 **No hits.** Drop to the single most distinctive word, usually an error string, a library name
 or an identifier. If that finds nothing, stop and say the conversation is not on this machine.
 That is a real answer, and a more useful one than a guess.
-
-Reach for the transcripts through `agsearch` rather than reading them directly. They are JSONL
-with tool calls, diffs and base64 attachments interleaved, so grepping them returns matches
-from machine noise rather than from anything anyone said.
 
 ## Open a session
 
@@ -97,5 +96,4 @@ Use these when a query returns the right topic from the wrong repository.
 
 Matching is lexical, not semantic. A session that discussed an idea in different words will
 not surface, so a search returning nothing is weak evidence that a conversation never
-happened. Everything runs locally against files already on disk, and nothing leaves the
-machine.
+happened.
