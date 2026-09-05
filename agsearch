@@ -182,6 +182,15 @@ def parse_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
             entry = o.get("entrypoint") or entry            # cli vs sdk-py/sdk-ts
             msg = o.get("message", {}) or {}
             role = msg.get("role", t)
+            # Claude Code files a tool's output under the user's role. Left as "user" the
+            # preview tells the reader you said "The file has been updated successfully",
+            # which is the one thing a transcript must not get wrong. Nine in ten user-role
+            # entries are this. Still indexed: an error string a search has to find lives in
+            # tool output, not in what anyone typed.
+            content = msg.get("content")
+            if role == "user" and isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                role = "tool"
             ts = o.get("timestamp", "")
 
             if t == "assistant" and include_thinking:
@@ -1097,16 +1106,17 @@ def _session_path(sid):
 
 
 def _turn_header(role, source, is_sub):
-    """Chat-style role gutter for a preview turn: '▌ you', '▌ claude', '▌ ⤷ codex'.
+    """Chat-style role gutter for a preview turn: '▌ you', '▌ claude', '▌ tool'.
 
     The agent side is named after the source so the preview mirrors the tool the session came
     from, the way you saw it in Claude Code or Codex.
     """
     agent = _source(source)["label"]
-    name = {"user": "you", "assistant": agent, "thinking": "thinking"}.get(role, role or "?")
+    name = {"user": "you", "assistant": agent, "thinking": "thinking",
+            "tool": "tool"}.get(role, role or "?")
     if is_sub:
         return f"\033[35m▌ ⤷ {name}\033[0m"
-    color = {"user": "36", "assistant": "32", "thinking": "90"}.get(role, "37")
+    color = {"user": "36", "assistant": "32", "thinking": "90", "tool": "90"}.get(role, "37")
     return f"\033[{color}m▌ {name}\033[0m"
 
 

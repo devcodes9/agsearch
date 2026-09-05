@@ -425,6 +425,46 @@ class MetaEntryTests(unittest.TestCase):
         self.assertEqual(1, len(rows))
         self.assertEqual("fix the retry backoff", rows[0][7])
 
+    def test_tool_output_is_not_labelled_as_the_user(self):
+        """Claude Code files a tool's output under the user's role. Nine in ten user-role
+        entries are this, and a preview that calls them `you` tells the reader they said
+        "The file has been updated successfully"."""
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "11111111-2222-3333-4444-555555555555.jsonl")
+        entries = [
+            self.turn("user", "fix the retry backoff"),
+            {"type": "user", "sessionId": "11111111-2222-3333-4444-555555555555",
+             "cwd": "/work", "timestamp": "2026-01-01T00:01:00Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "content": "The file has been updated successfully"}]}},
+            self.turn("assistant", "done"),
+        ]
+        with open(path, "w") as fh:
+            for e in entries:
+                fh.write(json.dumps(e) + "\n")
+        _sid, rows = ag.parse_session(path)
+        self.assertEqual(["user", "tool", "assistant"], [r[4] for r in rows])
+
+    def test_tool_output_is_still_indexed(self):
+        """An error string a search has to find lives in tool output, not in what anyone
+        typed. Relabelling it must not drop it from the index."""
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "11111111-2222-3333-4444-555555555555.jsonl")
+        with open(path, "w") as fh:
+            fh.write(json.dumps({
+                "type": "user", "sessionId": "11111111-2222-3333-4444-555555555555",
+                "cwd": "/w", "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "content": "ECONNRESET on webhook delivery"}]}}) + "\n")
+        _sid, rows = ag.parse_session(path)
+        self.assertEqual(1, len(rows))
+        self.assertIn("ECONNRESET", rows[0][7])
+
+    def test_the_gutter_names_the_tool_not_the_user(self):
+        header = ag._turn_header("tool", "cc", False)
+        self.assertIn("tool", header)
+        self.assertNotIn("you", header)
+
     def test_ordinary_turns_are_untouched(self):
         _sid, rows = self.parse([self.turn("user", "a"), self.turn("assistant", "b")])
         self.assertEqual(["a", "b"], [r[7] for r in rows])
