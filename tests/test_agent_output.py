@@ -89,6 +89,42 @@ class PipedRowTests(unittest.TestCase):
         self.assertIn("agsearch read", out)
 
 
+class ElideTests(unittest.TestCase):
+    """A capped `read` has to drop the right turns, not merely few enough of them."""
+
+    def blocks(self, n, size=100):
+        return [f"{i:03d}" + "x" * (size - 3) for i in range(n)]
+
+    def test_a_transcript_inside_the_budget_is_untouched(self):
+        b = self.blocks(5)
+        self.assertEqual(ag._elide(b, 10_000), (b, 0))
+
+    def test_the_opening_and_the_ending_survive(self):
+        """What were we doing, and where did we stop."""
+        b = self.blocks(50)
+        kept, dropped = ag._elide(b, 1000)
+        self.assertIn(b[0], kept)
+        self.assertIn(b[-1], kept)
+        self.assertEqual(dropped, 50 - len(kept))
+
+    def test_matched_turns_outrank_the_ending(self):
+        """Asking what was said about X and getting the last twenty messages is a wrong answer."""
+        b = self.blocks(50)
+        kept, _dropped = ag._elide(b, 1000, matched=[20, 21, 22])
+        for i in (20, 21, 22):
+            self.assertIn(b[i], kept)
+
+    def test_kept_turns_stay_in_order(self):
+        b = self.blocks(50)
+        kept, _dropped = ag._elide(b, 1000, matched=[30, 10])
+        self.assertEqual(kept, [x for x in b if x in set(kept)])
+
+    def test_a_budget_smaller_than_one_turn_still_returns(self):
+        b = self.blocks(10)
+        kept, dropped = ag._elide(b, 1)
+        self.assertEqual(len(kept) + dropped, 10)
+
+
 class ResolveSidTests(unittest.TestCase):
     def test_a_whole_id_resolves_to_itself(self):
         self.assertEqual(resolve(UUID4, UUID4[0]), (UUID4[0], None))

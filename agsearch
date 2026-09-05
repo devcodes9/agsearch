@@ -21,7 +21,12 @@ Usage:
 
 `-n` prints one entry per session, led by its session id, and drops colour when it is
 not writing to a terminal — so a script or a coding agent can search, then read a hit
-with `agsearch read <session-id>`.
+with `agsearch read <session-id>`. Piped, ids shorten to a unique prefix, the columns
+lose their padding and `read` caps its output; a terminal sees none of that.
+
+Claude can drive that loop itself. `/plugin marketplace add devcodes9/agsearch` then
+`/plugin install agsearch@agsearch` installs a skill that searches these sessions when
+you refer to earlier work, instead of answering that it has no record of it.
 
 In the TUI the right pane previews the matched session, auto-scrolled to your match
 (marked ▶) with a "match N of M" header. Enter resumes the session (and copies your
@@ -1015,24 +1020,27 @@ AGENT_READ_CHARS = 12_000       # what a piped `read` spends before it starts el
 OPENING_TURNS = 2               # kept whatever the budget: the opening states the goal
 
 
-def _elide(blocks, budget):
-    """Keep the opening turns and as many closing turns as fit, drop the middle.
+def _elide(blocks, budget, matched=()):
+    """Fit a transcript into `budget` characters, keeping the turns worth keeping.
 
     A session is read to answer one of two questions: what were we doing, and where did we
-    stop. The first lives in the opening turns and the second in the closing ones, so a
-    transcript too long to print whole loses least from the middle. Returns (blocks, dropped).
+    stop. Those live at the two ends, so the middle is what a too-long transcript can afford
+    to lose. A query changes the question to a third one, what was said about this, and then
+    the turns that matched outrank the ending: asking for matches and getting the last twenty
+    messages instead is the wrong answer to the question that was asked.
+
+    Returns (blocks, dropped).
     """
     if sum(len(b) for b in blocks) <= budget:
         return blocks, 0
-    head = blocks[:OPENING_TURNS]
-    spent = sum(len(b) for b in head)
-    tail = []
-    for b in reversed(blocks[OPENING_TURNS:]):
-        if spent + len(b) > budget:
-            break
-        tail.insert(0, b)
-        spent += len(b)
-    return head + tail, len(blocks) - len(head) - len(tail)
+    n = len(blocks)
+    keep = set(range(min(OPENING_TURNS, n)))            # the opening states the goal
+    spent = sum(len(blocks[i]) for i in keep)
+    for i in list(matched) + list(range(n - 1, -1, -1)):  # matches, then the ending
+        if i not in keep and spent + len(blocks[i]) <= budget:
+            keep.add(i)
+            spent += len(blocks[i])
+    return [blocks[i] for i in sorted(keep)], n - len(keep)
 
 
 def render_transcript(sid, thinking="0", query="", color=None, budget=None):
@@ -1063,22 +1071,24 @@ def render_transcript(sid, thinking="0", query="", color=None, budget=None):
            + (f" · {n_sub} subagent" if n_sub else "") + fork_line(sid) + "\033[0m",
            f"\033[2m{resume_line(sid, r0[1])}\033[0m\n"]
 
-    blocks = []
+    blocks, matched = [], []
     for r, sub in tagged:
         hit = bool(keys) and all(k in r[7].lower() for k in keys)
         mark = "\033[1;33m▶\033[0m " if hit else "  "
+        if hit:
+            matched.append(len(blocks))
         blocks.append(mark + _turn_header(r[4], source, sub) + "\n"
                       + f"\033[2m{r[3][11:16]}\033[0m  " + _snippet(r[7], keys, 100_000) + "\n")
 
-    dropped = 0
+    total, dropped = len(blocks), 0
     if budget:
-        blocks, dropped = _elide(blocks, budget)
+        blocks, dropped = _elide(blocks, budget, matched)
     if dropped:
-        note = (f"[{dropped} messages elided from the middle. "
-                f"To see them, search inside this session: "
-                f'agsearch -n "<terms>" | grep {sid[:13]}, '
-                f"or read it whole: agsearch read {sid[:13]} --full]")
-        blocks.insert(OPENING_TURNS, "\033[2m" + note + "\033[0m\n")
+        kept = ("the opening, every turn matching your query that fits, and the ending"
+                if matched else "the opening and the ending")
+        note = (f"[{dropped} of {total} messages elided; kept {kept}. "
+                f"Whole transcript: agsearch read {sid[:13]} --full]")
+        blocks.insert(min(OPENING_TURNS, len(blocks)), "\033[2m" + note + "\033[0m\n")
     _emit("\n".join(out + blocks) + "\n", color)
     return 0
 
