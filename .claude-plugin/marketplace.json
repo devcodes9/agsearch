@@ -8,8 +8,8 @@
     {
       "name": "agsearch",
       "source": "./",
-      "description": "Search your past Claude Code, Codex, Cursor, opencode and Gemini CLI sessions from inside Claude"
+      "description": "Search your past Claude Code, Codex, Cursor CLI, opencode and Gemini CLI sessions from inside Claude"
     }
   ],
-  "description": "agsearch: search your past Claude Code, Codex, Cursor, opencode and Gemini CLI sessions from inside Claude"
+  "description": "agsearch: search your past Claude Code, Codex, Cursor CLI, opencode and Gemini CLI sessions from inside Claude"
 }

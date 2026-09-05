@@ -73,8 +73,8 @@ class ShippedDescriptionTests(unittest.TestCase):
     """
 
     # How each source is spelled in prose, which is not always its column label.
-    PROSE = {"cc": "Claude Code", "codex": "Codex", "cursor": "Cursor",
-             "opencode": "opencode", "gemini": "Gemini"}
+    PROSE = {"cc": "Claude Code", "codex": "Codex", "cursor": "Cursor CLI",
+             "opencode": "opencode", "gemini": "Gemini CLI"}
 
     def described_files(self):
         root = pathlib.Path(__file__).resolve().parents[1]

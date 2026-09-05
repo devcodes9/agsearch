@@ -1,6 +1,6 @@
 ---
 name: agsearch
-description: Use when the user refers to work from an earlier session ("what did we decide about X", "we hit this error before"), asks to continue or hand one off, or when you are about to say you have no record of a conversation that happened before this one. Not for earlier in this same conversation. Use this instead of grepping ~/.claude/projects, ~/.codex/sessions or any transcript directory yourself. Searches Claude Code, Codex, Cursor, opencode and Gemini CLI transcripts on this machine.
+description: Use when the user refers to work from an earlier session ("what did we decide about X", "we hit this error before"), asks to continue or hand one off, or when you are about to say you have no record of a conversation that happened before this one. Not for earlier in this same conversation. Use this instead of grepping ~/.claude/projects, ~/.codex/sessions or any transcript directory yourself. Searches Claude Code, Codex, Cursor CLI, opencode and Gemini CLI transcripts on this machine.
 ---
 
 # agsearch

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agsearch"
-description = "Search every Claude Code, Codex, Cursor, opencode and Gemini CLI session by what was said in it, then resume it"
+description = "Search every Claude Code, Codex, Cursor CLI, opencode and Gemini CLI session by what was said in it, then resume it"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

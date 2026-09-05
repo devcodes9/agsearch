@@ -7,7 +7,7 @@
 
 <p align="center">
   Ranked full-text search across the coding-agent sessions already on your machine.<br>
-  <strong>Claude Code</strong>, <strong>Codex</strong>, <strong>Cursor</strong>, <strong>opencode</strong> and <strong>Gemini CLI</strong>.
+  <strong>Claude Code</strong>, <strong>Codex</strong>, <strong>Cursor CLI</strong>, <strong>opencode</strong> and <strong>Gemini CLI</strong>.
 </p>
 
 <p align="center">
