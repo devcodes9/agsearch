@@ -7,7 +7,7 @@
 
 <p align="center">
   Ranked full-text search across the coding-agent sessions already on your machine.<br>
-  <strong>Claude Code</strong> and <strong>Codex CLI</strong> today, more next.
+  <strong>Claude Code</strong>, <strong>Codex</strong>, <strong>Cursor</strong> and <strong>Gemini CLI</strong>.
 </p>
 
 <p align="center">
@@ -16,8 +16,8 @@
 </p>
 
 agsearch indexes the local transcripts your coding agents already write. Search them in one
-ranked list, preview the matching lines, and resume the original Claude Code or Codex session.
-Everything stays on your machine.
+ranked list, preview the matching lines, and resume the original session in the tool it came
+from. Everything stays on your machine.
 
 <p align="center"><img src="https://raw.githubusercontent.com/devcodes9/agsearch/main/docs/demo.gif" alt="Searching 52 sessions; the second query is misspelled and still lands on the right one" width="100%"></p>
 
@@ -42,10 +42,9 @@ uvx agsearch -n "stripe tax id"
 
 - **Full-conversation search.** Search user prompts and assistant replies, not only titles and
   session metadata.
-- **One list for both tools.** Claude Code and Codex sessions appear together, labelled `cc`
-  and `cx`. Adding another agent is a parser plus a source entry, with no change to search or
-  ranking — [Gemini CLI and opencode](https://github.com/devcodes9/agsearch/issues/40) are the
-  tracked candidates.
+- **One list for every tool.** Sessions from all four agents appear together, labelled `cc`,
+  `cx`, `cu` and `gm`. Adding another agent is a parser plus one entry in the source table,
+  with no change to search or ranking.
 - **Ranked results.** BM25 ranking favors focused sessions and shows matching lines in context.
 - **Preview, read, or resume.** Inspect a match, open the transcript in a pager, or return to the
   original session.
@@ -156,8 +155,8 @@ Either way it needs the `agsearch` binary, which the installation section above 
 | <kbd>Ctrl-Y</kbd> | Copy the resume command |
 | <kbd>Ctrl-/</kbd> | Toggle the preview pane |
 
-Selecting a result starts `claude --resume` or `codex resume` from the session's project
-directory. The current query is copied to the clipboard so you can find the same text after
+Selecting a result resumes the session in the tool that created it, from that session's
+project directory. The current query is copied to the clipboard so you can find the same text after
 resuming.
 
 For a global shortcut, see the
@@ -189,8 +188,16 @@ words, and the first result is not guaranteed to be the session you intended.
 
 agsearch reads:
 
-- `~/.claude/projects/**/*.jsonl`
-- `~/.codex/sessions/**/*.jsonl`
+| Agent | Read from | Resumed with |
+| --- | --- | --- |
+| Claude Code | `~/.claude/projects/**/*.jsonl` | `claude --resume <id>` |
+| Codex | `~/.codex/sessions/**/*.jsonl` | `codex resume <id>` |
+| Cursor | `~/.cursor/chats/**/store.db` | `cursor-agent --resume <id>` |
+| Gemini CLI | `~/.gemini/tmp/**/chats/*.json` | `gemini --session-file <path>` |
+
+Cursor keeps each chat in a SQLite store; agsearch opens it read-only and reads message
+records only. Gemini's `--resume` takes a project-scoped index number rather than a stable
+id, so resume goes through the transcript file instead.
 
 Its cache lives under `~/.cache/agsearch/`. Transcript parsing and ranking happen locally, and
 only changed files are reparsed.

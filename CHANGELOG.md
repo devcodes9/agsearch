@@ -11,7 +11,25 @@ migration in the same line.
 
 ## [Unreleased]
 
+### Added
+
+- **Cursor and Gemini CLI sessions are indexed, searched and resumed** alongside Claude Code
+  and Codex, labelled `cu` and `gm`. Cursor keeps each chat as a SQLite store under
+  `~/.cursor/chats/`, opened read-only, reading message records and skipping the binary and
+  image blobs beside them; it resumes with `cursor-agent --resume <id>`. Gemini keeps one JSON
+  object per session under `~/.gemini/tmp/`, and resumes with `gemini --session-file <path>`
+  because its `--resume` takes a project-scoped index number rather than a stable id.
+  On a 852-session corpus, adding 101 Cursor sessions moved held-out ranking by +0.004, so
+  existing searches are unaffected.
+
 ### Changed
+
+- **Harnesses are described by one source table instead of a ternary in five places.** Adding
+  an agent was supposed to be one line, but the file extension, the parser used for preview,
+  the row label, the preview label and the resume command each decided for themselves what a
+  source was, and two of them had already drifted (`codex` against `cx`). They now read one
+  record per harness, so a new agent is a parser plus one entry. Behaviour for Claude Code and
+  Codex is unchanged; the cache format bumps to 7 and reindexes once on first run.
 
 - **Piped output is shaped for the program reading it.** `-n` and `read` are what a coding
   agent sees, and an agent pays per character for what a terminal gets free. Behind the same

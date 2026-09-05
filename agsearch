@@ -2,10 +2,15 @@
 """
 agsearch — global full-text search across all your coding agent sessions.
 
-Claude Code and Codex CLI each store every session as local JSONL (~/.claude/projects/
-and ~/.codex/sessions/). Their native pickers search session *metadata* — the title, the
-first prompt, the branch. This searches what was actually *said*, across both tools, and
-drops you straight back into the session with `claude --resume` or `codex resume`.
+Claude Code, Codex, Cursor and Gemini CLI each keep every session on disk. Their native
+pickers search session *metadata*: the title, the first prompt, the branch. This searches
+what was actually *said*, across all of them at once, and drops you straight back into the
+session with that tool's own resume command.
+
+    cc  Claude Code   ~/.claude/projects        claude --resume
+    cx  Codex         ~/.codex/sessions         codex resume
+    cu  Cursor        ~/.cursor/chats           cursor-agent --resume
+    gm  Gemini CLI    ~/.gemini/tmp             gemini --session-file
 
 Usage:
     agsearch                       # interactive fuzzy TUI (needs fzf)
@@ -54,6 +59,8 @@ import subprocess
 HOME = os.path.expanduser("~")
 PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
+GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
+CURSOR_DIR = os.path.join(HOME, ".cursor", "chats")
 CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "agsearch")
 FRAG_DIR = os.path.join(CACHE_DIR, "frag")
 META_PATH = os.path.join(CACHE_DIR, "meta.json")
@@ -62,7 +69,7 @@ SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subag
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
 FORKS_PATH = os.path.join(CACHE_DIR, "forks.json")        # forked sid -> {of, at}
 
-CACHE_FMT = 6   # bump when the TSV column layout / keying changes, to invalidate old fragments
+CACHE_FMT = 7   # bump when the TSV column layout / keying changes, to invalidate old fragments
 
 # TSV columns (tab-separated, one row per message):
 #   0 session_id  1 cwd  2 gitBranch  3 iso_date  4 role  5 seq  6 title  7 text
@@ -264,6 +271,243 @@ def parse_codex_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
     final = [[sid, r[1], r[2], r[3], r[4], str(i), title, r[7], "cli"] for i, r in enumerate(rows)]
     return sid, final
 
+
+# ------------------------------------------------------------------ gemini cli
+
+# Gemini writes a session as ONE json object, not jsonl, and tags every entry with a `type`
+# rather than a role. Only the two conversational types are indexed: `info`, `error` and the
+# rest are CLI chrome (auth prompts, update notices) that would match queries and mean nothing.
+_GEMINI_ROLE = {"user": "user", "gemini": "assistant", "model": "assistant",
+                "assistant": "assistant"}
+
+
+def _gemini_cwd(path):
+    """Gemini records a `projectHash`, never the directory it ran in.
+
+    The transcript lives at ~/.gemini/tmp/<project>/chats/<session>.json, and the sibling
+    `.project_root` file holds the real absolute path. Without it there is nothing to recover:
+    the hash is a sha256 and the directory name is a basename, not a path.
+    """
+    proj = os.path.dirname(os.path.dirname(path))         # .../tmp/<project>
+    try:
+        with open(os.path.join(proj, ".project_root"), errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def parse_gemini_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
+    """Parse one Gemini CLI chat json into the shared 9-field row schema.
+
+    Keyed by the `sessionId` field. Resume is by file path (`gemini --session-file`), not by id,
+    so the id here is for display and dedupe only.
+    """
+    sid = os.path.splitext(os.path.basename(path))[0]
+    try:
+        with open(path, errors="replace") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return sid, []
+    if not isinstance(doc, dict):
+        return sid, []
+
+    sid = doc.get("sessionId") or sid
+    cwd = _gemini_cwd(path)
+    ts0 = doc.get("startTime") or doc.get("lastUpdated") or ""
+
+    rows = []
+    for m in doc.get("messages", []):
+        if not isinstance(m, dict):
+            continue
+        role = _GEMINI_ROLE.get(m.get("type"))
+        if not role:
+            continue
+        text = _single_line(_flatten_content(m.get("content", "")), limit)
+        if not text:
+            continue
+        rows.append([sid, cwd, "", m.get("timestamp") or ts0, role, "", "", text])
+
+    title = ""
+    for r in rows:
+        if r[4] == "user":
+            title = r[7][:90]
+            break
+    return sid, [[sid, r[1], r[2], r[3], r[4], str(i), title, r[7], "cli"]
+                 for i, r in enumerate(rows)]
+
+
+# ------------------------------------------------------------------ cursor
+
+# Cursor keeps one directory per chat: meta.json (title, cwd, timestamps) beside a SQLite
+# store.db whose `blobs` table is content-addressed. Message blobs are plain json; the rest of
+# the table is binary merkle nodes and embedded images, which is why the scan filters on the
+# leading byte in SQL and never pulls the binary rows into Python.
+_CURSOR_JSON_BLOBS = "SELECT data FROM blobs WHERE substr(data, 1, 1) = x'7b'"
+_CURSOR_MAX_BLOBS = 5000
+
+# Cursor injects context into the user turn the way Codex injects a preamble. Indexing it makes
+# every session match "OS Version" and buries what the human actually typed.
+_CURSOR_TAG_BLOCK = re.compile(r"^\s*<([a-z_]+)>.*?</\1>\s*", re.DOTALL)
+
+
+def _cursor_strip_context(text):
+    """Drop the leading <user_info>...</user_info> style blocks Cursor prepends to a user turn."""
+    prev = None
+    while prev != text:
+        prev = text
+        text = _CURSOR_TAG_BLOCK.sub("", text, count=1)
+    return text
+
+
+def _cursor_meta(chat_dir):
+    try:
+        with open(os.path.join(chat_dir, "meta.json"), errors="replace") as fh:
+            m = json.load(fh)
+        return m if isinstance(m, dict) else {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+
+
+def _cursor_connect(path):
+    """Open store.db without ever taking a write lock on a chat Cursor may still be using."""
+    import sqlite3
+    for uri in ("file:%s?mode=ro" % path, "file:%s?immutable=1" % path):
+        try:
+            return sqlite3.connect(uri, uri=True, timeout=1.0)
+        except sqlite3.Error:
+            continue
+    return None
+
+
+def parse_cursor_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
+    """Parse one Cursor chat (`.../<chatId>/store.db`) into the shared 9-field row schema.
+
+    Keyed by the chat directory name, which is what `cursor-agent --resume <chatId>` takes.
+
+    Blob order: the conversation's real ordering lives in a binary root blob, and decoding that
+    format is not worth it. SQLite rowid is insertion order, which is the same thing in practice.
+    Every row carries the session's `updatedAtMs`, so `group_sessions` (which takes the max row
+    timestamp) dates the session correctly, and the stable sort in `load_session_rows` leaves
+    rowid order intact rather than inventing per-message times that were never recorded.
+    """
+    chat_dir = os.path.dirname(path)
+    sid = os.path.basename(chat_dir)
+    meta = _cursor_meta(chat_dir)
+    cwd = meta.get("cwd", "") or ""
+    title = _single_line(meta.get("title", "") or "", 90)
+
+    ms = meta.get("updatedAtMs") or meta.get("createdAtMs")
+    try:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ms / 1000.0)) if ms else ""
+    except (TypeError, ValueError, OSError):
+        ts = ""
+
+    conn = _cursor_connect(path)
+    if conn is None:
+        return sid, []
+    rows = []
+    try:
+        cur = conn.execute(_CURSOR_JSON_BLOBS)
+        for n, (data,) in enumerate(cur):
+            if n >= _CURSOR_MAX_BLOBS:
+                break
+            try:
+                o = json.loads(bytes(data).decode("utf-8", "replace"))
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+                continue
+            if not isinstance(o, dict):
+                continue
+            role = o.get("role")
+            if role not in ("user", "assistant"):      # `system` is the prompt, not the chat
+                continue
+            text = _flatten_content(o.get("content", ""))
+            if role == "user":
+                text = _cursor_strip_context(text)
+            text = _single_line(text, limit)
+            if not text:
+                continue
+            rows.append([sid, cwd, "", ts, role, "", title, text])
+    except Exception:                  # a truncated or mid-write store is not worth crashing on
+        pass
+    finally:
+        conn.close()
+
+    if not title:
+        for r in rows:
+            if r[4] == "user":
+                title = r[7][:90]
+                break
+    return sid, [[sid, r[1], r[2], r[3], r[4], str(i), title, r[7], "cli"]
+                 for i, r in enumerate(rows)]
+
+# ------------------------------------------------------------------ sources
+
+def _is_jsonl(name):
+    return name.endswith(".jsonl")
+
+
+def _is_gemini_chat(name):
+    return name.startswith("session-") and name.endswith(".json")
+
+
+def _is_cursor_store(name):
+    return name == "store.db"
+
+
+# One record per harness, keyed by the source tag stored in index.json. Everything that used to
+# be a `source == "codex"` ternary reads this table instead, so adding a harness is one entry
+# plus a parser rather than an edit in five places that can silently disagree.
+#
+#   roots    directories to walk for transcripts
+#   match    filename predicate; harnesses do not agree on an extension
+#   parse    (path, include_thinking, limit) -> (sid, rows) in the shared 9-field schema
+#   tag      2-char label for the source column and assistant turns
+#   label    what the preview calls the agent side
+#   colour   SGR code for the source column
+#   resume   ("id", argv) substitutes {sid}; ("path", argv) substitutes {path}
+#   subagents   harness writes separate subagent transcripts that fold into the parent
+#   launch_dir  resume is scoped to the directory the session was started in
+SOURCES = {
+    "cc": {
+        "roots": [PROJECTS_DIR], "match": _is_jsonl, "parse": None,
+        "tag": "cc", "label": "claude", "colour": "34",
+        "resume": ("id", ["claude", "--resume", "{sid}"]),
+        "subagents": True, "launch_dir": True,
+    },
+    "codex": {
+        "roots": [CODEX_DIR], "match": _is_jsonl, "parse": None,
+        "tag": "cx", "label": "codex", "colour": "35",
+        "resume": ("id", ["codex", "resume", "{sid}"]),
+        "subagents": False, "launch_dir": False,
+    },
+    "gemini": {
+        "roots": [GEMINI_DIR], "match": _is_gemini_chat, "parse": None,
+        "tag": "gm", "label": "gemini", "colour": "36",
+        # --resume takes a project-scoped index number, which is not a stable handle for a
+        # session found by search. --session-file takes the transcript path, which is.
+        "resume": ("path", ["gemini", "--session-file", "{path}"]),
+        "subagents": False, "launch_dir": False,
+    },
+    "cursor": {
+        "roots": [CURSOR_DIR], "match": _is_cursor_store, "parse": None,
+        "tag": "cu", "label": "cursor", "colour": "32",
+        "resume": ("id", ["cursor-agent", "--resume", "{sid}"]),
+        "subagents": False, "launch_dir": False,
+    },
+}
+
+SOURCES["cc"]["parse"] = parse_session
+SOURCES["codex"]["parse"] = parse_codex_session
+SOURCES["gemini"]["parse"] = parse_gemini_session
+SOURCES["cursor"]["parse"] = parse_cursor_session
+
+DEFAULT_SOURCE = "cc"
+
+
+def _source(name):
+    """The record for a source tag, falling back to Claude for an index written by an older
+    version that did not know this harness."""
+    return SOURCES.get(name) or SOURCES[DEFAULT_SOURCE]
 
 # ------------------------------------------------------------------ forks
 
@@ -476,21 +720,24 @@ def build_index(include_thinking=False, force=False):
         force = True          # thinking toggle or format change invalidates fragments
         meta = {}
 
-    # Each source: (tag, root dir, parser). Add more agents here later (Cursor, Gemini…).
-    sources = [("cc", PROJECTS_DIR, parse_session), ("codex", CODEX_DIR, parse_codex_session)]
+    # Harnesses disagree on where transcripts live and what they are named, so both the roots
+    # and the filename test come from the source record rather than being hardcoded here.
     files = []                          # (path, source, parser)
-    for source, root, parser in sources:
-        if os.path.isdir(root):
+    for source, rec in SOURCES.items():
+        match, parser = rec["match"], rec["parse"]
+        for root in rec["roots"]:
+            if not os.path.isdir(root):
+                continue
             for r, _dirs, fs in os.walk(root):
                 for fn in fs:
-                    if fn.endswith(".jsonl"):
+                    if match(fn):
                         files.append((os.path.join(r, fn), source, parser))
 
     # Stat every file once up front: the same mtimes decide cache hits below and
     # tell us how many sessions actually need parsing, which is what we report.
     mtimes = {}
     stale = 0
-    for path, _source, _parser in files:
+    for path, _src, _parser in files:
         try:
             mtimes[path] = os.path.getmtime(path)
         except OSError:
@@ -525,7 +772,7 @@ def build_index(include_thinking=False, force=False):
             continue
         sid0 = frag_lines[0].split(SEP, 1)[0]
         base = os.path.basename(path)
-        if source == "cc" and base.startswith("agent-"):
+        if _source(source)["subagents"] and base.startswith("agent-"):
             sub_map.setdefault(sid0, []).append(path)     # subagent folds into parent
         else:
             index[sid0] = {"source": source, "path": path}
@@ -584,12 +831,12 @@ ROW_TEXT_WIDTH = 160        # the "why it matched" line under a result, however 
 
 
 def _agent_tag(source):
-    """Name the agent side of a session after the tool it came from: cc (Claude) or cx (Codex).
+    """Name the agent side of a session after the tool it came from: cc, cx, gm, cu.
 
     The session list already marks the source that way, so a row or preview line that calls
     every assistant turn `cc` contradicts the column two inches to its left.
     """
-    return "cx" if source == "codex" else "cc"
+    return _source(source)["tag"]
 
 
 AGENT_ID_MIN = 12       # git's short-hash rule; see _short_id_len for why 8 is not enough
@@ -718,7 +965,7 @@ def _turn_header(role, source, is_sub):
     The agent side is named after the source so the preview mirrors the tool the session came
     from, the way you saw it in Claude Code or Codex.
     """
-    agent = "codex" if source == "codex" else "claude"
+    agent = _source(source)["label"]
     name = {"user": "you", "assistant": agent, "thinking": "thinking"}.get(role, role or "?")
     if is_sub:
         return f"\033[35m▌ ⤷ {name}\033[0m"
@@ -984,16 +1231,13 @@ def load_session_rows(sid, thinking=False, limit=MSG_INDEX_CHARS):
     source = info.get("source", "cc")
     path = info.get("path") or _session_path(sid)
 
-    # Codex sessions have no subagents; Claude folds them in.
+    # Only some harnesses write separate subagent transcripts; the rest are a single file.
+    rec = _source(source)
     tagged = []
-    if source == "codex":
-        if path:
-            _s, rows0 = parse_codex_session(path, include_thinking=thinking, limit=limit)
-            tagged = [(r, False) for r in rows0]
-    else:
-        if path:
-            _s, prows = parse_session(path, include_thinking=thinking, limit=limit)
-            tagged += [(r, False) for r in prows]
+    if path:
+        _s, prows = rec["parse"](path, include_thinking=thinking, limit=limit)
+        tagged += [(r, False) for r in prows]
+    if rec["subagents"]:
         try:
             submap = json.load(open(SUBMAP_PATH))
         except (OSError, json.JSONDecodeError):
@@ -1206,13 +1450,16 @@ def resume_plan(sid, cwd):
             info = json.load(fh).get(sid, {})
     except (OSError, json.JSONDecodeError):
         info = {}
-    source = info.get("source", "cc")
-    bin_, argv = ("codex", ["codex", "resume", sid]) if source == "codex" \
-        else ("claude", ["claude", "--resume", sid])
+    source = info.get("source", DEFAULT_SOURCE)
+    rec = _source(source)
+    kind, template = rec["resume"]
+    handle = info.get("path", "") if kind == "path" else sid
+    argv = [a.replace("{sid}", sid).replace("{path}", handle) for a in template]
+    bin_ = argv[0]
 
     # Claude looks for the session in the project of whatever directory it starts in, so resume
-    # from the dir it was launched in — not the `cwd` on the messages, which may be a subdir.
-    if source != "codex":
+    # from the dir it was launched in, not the `cwd` on the messages, which may be a subdir.
+    if rec["launch_dir"]:
         cwd = _launch_dir(info.get("path", ""), cwd) or cwd
 
     # The recorded worktree may be long gone. Resume is id-based, so relocate to the nearest
@@ -1365,7 +1612,10 @@ def _fuzzy_span(hay, term):
     return None
 
 
-_SRC_MARK = {"cc": "\033[34mcc  \033[0m", "codex": "\033[35mcx  \033[0m"}
+# Derived from SOURCES so the column and the assistant-turn label can never disagree about
+# what a harness is called. They used to be written out separately, and had already drifted.
+_SRC_MARK = {name: "\033[%sm%-4s\033[0m" % (rec["colour"], rec["tag"])
+             for name, rec in SOURCES.items()}
 _AUTO_MARK = "\033[90mauto\033[0m"          # plugin/SDK-spawned run, never your own typing
 _LIVE_MARK = "\033[1;31m●\033[0m "           # session still being written to → probably running
 # Informational only: the session still resumes (from the nearest surviving ancestor dir),

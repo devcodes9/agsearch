@@ -1,6 +1,6 @@
 {
   "name": "agsearch",
-  "description": "Search your past Claude Code and Codex sessions from inside Claude",
+  "description": "Search your past Claude Code, Codex, Cursor and Gemini CLI sessions from inside Claude",
   "version": "0.1.0",
   "author": { "name": "Dev Dalia" },
   "homepage": "https://github.com/devcodes9/agsearch",
