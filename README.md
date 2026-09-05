@@ -19,7 +19,7 @@ agsearch indexes the local transcripts your coding agents already write. Search 
 ranked list, preview the matching lines, and resume the original session in the tool it came
 from. Everything stays on your machine.
 
-<p align="center"><img src="https://raw.githubusercontent.com/devcodes9/agsearch/main/docs/demo.gif" alt="Searching 52 sessions; the second query is misspelled and still lands on the right one" width="100%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/devcodes9/agsearch/main/docs/demo.gif" alt="Searching 53 sessions across five coding agents; the second query is misspelled and still lands on the right one" width="100%"></p>
 
 ## Quick start
 
