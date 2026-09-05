@@ -1,0 +1,23 @@
+[
+  {"query": "what did we decide about the webhook retry backoff?", "should_trigger": true},
+  {"query": "we hit this exact error before, what was the fix?", "should_trigger": true},
+  {"query": "continue the work from yesterday's session on the payment flow", "should_trigger": true},
+  {"query": "find the session where I set up the Stripe tax id", "should_trigger": true},
+  {"query": "did I ever look into why the badge count was wrong?", "should_trigger": true},
+  {"query": "pick up where we left off on the database migration", "should_trigger": true},
+  {"query": "there was a Cursor chat about the redesign bug, what did it say?", "should_trigger": true},
+  {"query": "hand off what was done last week on auth so I can carry on", "should_trigger": true},
+  {"query": "remind me which approach we settled on for caching", "should_trigger": true},
+  {"query": "I debugged the SNS retries in some other session, what did I find?", "should_trigger": true},
+
+  {"query": "what does this function do?", "should_trigger": false},
+  {"query": "run the tests", "should_trigger": false},
+  {"query": "grep for TODO in src/", "should_trigger": false},
+  {"query": "summarize this pull request", "should_trigger": false},
+  {"query": "earlier in this file there is a helper that does the same thing, refactor it", "should_trigger": false},
+  {"query": "before you commit, run the linter", "should_trigger": false},
+  {"query": "we discussed this a few messages ago, apply it to the other handler", "should_trigger": false},
+  {"query": "what did the last commit change?", "should_trigger": false},
+  {"query": "show me the previous version of this file in git", "should_trigger": false},
+  {"query": "search the codebase for parse_session", "should_trigger": false}
+]
