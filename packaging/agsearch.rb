@@ -9,7 +9,7 @@
 class Agsearch < Formula
   include Language::Python::Shebang
 
-  desc "Search every Claude Code, Codex, Cursor and Gemini CLI session, then resume the right one"
+  desc "Search every Claude Code, Codex, Cursor, opencode and Gemini CLI session, then resume the right one"
   homepage "https://github.com/devcodes9/agsearch"
   url "https://github.com/devcodes9/agsearch/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"

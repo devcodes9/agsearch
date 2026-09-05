@@ -240,6 +240,116 @@ class CursorParserTests(unittest.TestCase):
         self.assertEqual("untitled chat topic", rows[0][C_TITLE])
 
 
+def write_opencode(sessions):
+    """sessions: {sid: (directory, title, [(role, [(part_type, text), ...]), ...])}"""
+    root = tempfile.mkdtemp()
+    db = os.path.join(root, "opencode.db")
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE session (id text PRIMARY KEY, project_id text, directory text, "
+                 "title text, time_created integer, time_updated integer)")
+    conn.execute("CREATE TABLE message (id text PRIMARY KEY, session_id text, "
+                 "time_created integer, data text)")
+    conn.execute("CREATE TABLE part (id text PRIMARY KEY, message_id text, session_id text, "
+                 "time_created integer, data text)")
+    t = 1767225600000
+    mn = pn = 0
+    for sid, (directory, title, turns) in sessions.items():
+        conn.execute("INSERT INTO session VALUES (?,?,?,?,?,?)",
+                     (sid, "proj", directory, title, t, t + 60000))
+        for role, parts in turns:
+            mn += 1
+            mid = "msg%d" % mn
+            conn.execute("INSERT INTO message VALUES (?,?,?,?)",
+                         (mid, sid, t + mn, json.dumps({"role": role})))
+            for ptype, text in parts:
+                pn += 1
+                body = {"type": ptype}
+                if text is not None:
+                    body["text"] = text
+                conn.execute("INSERT INTO part VALUES (?,?,?,?,?)",
+                             ("prt%d" % pn, mid, sid, t + pn, json.dumps(body)))
+    conn.commit()
+    conn.close()
+    return db
+
+
+class OpencodeParserTests(unittest.TestCase):
+    def test_one_database_yields_every_session(self):
+        """opencode keeps all sessions in a single database. The indexer used to take the
+        first row's id as the id for the whole file, which collapsed them into one."""
+        db = write_opencode({
+            "ses_a": ("/work/one", "First", [("user", [("text", "quasar buffer")])]),
+            "ses_b": ("/work/two", "Second", [("user", [("text", "checksum ladder")])]),
+        })
+        _sid, rows = ag.parse_opencode_session(db)
+        self.assertEqual({"ses_a", "ses_b"}, {r[C_SID] for r in rows})
+        by = {r[C_SID]: r for r in rows}
+        self.assertEqual("/work/one", by["ses_a"][C_CWD])
+        self.assertEqual("Second", by["ses_b"][C_TITLE])
+
+    def test_rows_use_the_shared_schema(self):
+        db = write_opencode({"ses_a": ("/work", "T", [
+            ("user", [("text", "why does it retry")]),
+            ("assistant", [("text", "the backoff resets")]),
+        ])})
+        _sid, rows = ag.parse_opencode_session(db)
+        self.assertEqual(["user", "assistant"], [r[C_ROLE] for r in rows])
+        for i, r in enumerate(rows):
+            self.assertEqual(9, len(r))
+            self.assertEqual(str(i), r[C_SEQ])
+            self.assertEqual("cli", r[C_KIND])
+            self.assertTrue(r[C_TS].startswith("20"))
+
+    def test_only_text_parts_are_indexed(self):
+        """A message is made of typed parts. Tool calls and step markers are not conversation,
+        and reasoning is only indexed when the user asked for thinking."""
+        db = write_opencode({"ses_a": ("/w", "T", [("assistant", [
+            ("step-start", None), ("tool", "grep -r foo"),
+            ("reasoning", "internal deliberation"), ("text", "the visible answer"),
+        ])])})
+        _sid, rows = ag.parse_opencode_session(db)
+        self.assertEqual(["the visible answer"], [r[C_TEXT] for r in rows])
+        _sid, rows = ag.parse_opencode_session(db, include_thinking=True)
+        self.assertEqual(["internal deliberation", "the visible answer"],
+                         [r[C_TEXT] for r in rows])
+
+    def test_title_falls_back_to_the_first_user_turn(self):
+        db = write_opencode({"ses_a": ("/w", "", [("user", [("text", "the real task")])])})
+        _sid, rows = ag.parse_opencode_session(db)
+        self.assertEqual("the real task", rows[0][C_TITLE])
+
+    def test_missing_database_is_skipped_not_fatal(self):
+        sid, rows = ag.parse_opencode_session(os.path.join(tempfile.mkdtemp(), "opencode.db"))
+        self.assertEqual("", sid)
+        self.assertEqual([], rows)
+
+
+class SharedDatabaseTests(unittest.TestCase):
+    """A parser for a shared database hands back every session it holds. Reading one session
+    must show that session only."""
+
+    def test_preview_keeps_only_the_requested_session(self):
+        db = write_opencode({
+            "ses_a": ("/w", "A", [("user", [("text", "alpha content")])]),
+            "ses_b": ("/w", "B", [("user", [("text", "beta content")])]),
+        })
+        d = tempfile.mkdtemp()
+        old_index, old_sub = ag.INDEX_PATH, ag.SUBMAP_PATH
+        ag.INDEX_PATH = os.path.join(d, "index.json")
+        ag.SUBMAP_PATH = os.path.join(d, "submap.json")
+        try:
+            with open(ag.INDEX_PATH, "w") as fh:
+                json.dump({"ses_a": {"source": "opencode", "path": db},
+                           "ses_b": {"source": "opencode", "path": db}}, fh)
+            with open(ag.SUBMAP_PATH, "w") as fh:
+                json.dump({}, fh)
+            source, tagged = ag.load_session_rows("ses_b", False)
+            self.assertEqual("opencode", source)
+            self.assertEqual(["beta content"], [r[C_TEXT] for r, _sub in tagged])
+        finally:
+            ag.INDEX_PATH, ag.SUBMAP_PATH = old_index, old_sub
+
+
 class DiscoveryTests(unittest.TestCase):
     def test_each_harness_matches_only_its_own_files(self):
         """The walk used to accept `.jsonl` globally, which made every non-jsonl transcript
@@ -249,7 +359,8 @@ class DiscoveryTests(unittest.TestCase):
                  ("gemini", "session-2026-01-01T00-00-ab.json", True),
                  ("gemini", "logs.json", False),
                  ("cursor", "store.db", True), ("cursor", "store.db-wal", False),
-                 ("cursor", "prompt_history.json", False)]
+                 ("cursor", "prompt_history.json", False),
+                 ("opencode", "opencode.db", True), ("opencode", "opencode.db-wal", False)]
         for source, name, want in cases:
             self.assertEqual(want, bool(ag.SOURCES[source]["match"](name)),
                              "%s / %s" % (source, name))

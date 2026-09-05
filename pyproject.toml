@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agsearch"
-description = "Search every Claude Code, Codex, Cursor and Gemini CLI session by what was said in it, then resume it"
+description = "Search every Claude Code, Codex, Cursor, opencode and Gemini CLI session by what was said in it, then resume it"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Dev Dalia" }]
-keywords = ["claude-code", "codex", "cursor", "gemini-cli", "cli", "search", "tui", "session", "resume"]
+keywords = ["claude-code", "codex", "cursor", "opencode", "gemini-cli", "cli", "search", "tui", "session", "resume"]
 requires-python = ">=3.9"
 
 # Deliberately empty, and it is a feature. agsearch is stdlib-only, which is

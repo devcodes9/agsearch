@@ -2,14 +2,15 @@
 """
 agsearch — global full-text search across all your coding agent sessions.
 
-Claude Code, Codex, Cursor and Gemini CLI each keep every session on disk. Their native
-pickers search session *metadata*: the title, the first prompt, the branch. This searches
-what was actually *said*, across all of them at once, and drops you straight back into the
-session with that tool's own resume command.
+Every coding agent keeps its sessions on disk. Their native pickers search session
+*metadata*: the title, the first prompt, the branch. This searches what was actually *said*,
+across all of them at once, and drops you back into the session with that tool's own
+resume command.
 
     cc  Claude Code   ~/.claude/projects        claude --resume
     cx  Codex         ~/.codex/sessions         codex resume
     cu  Cursor        ~/.cursor/chats           cursor-agent --resume
+    oc  opencode      ~/.local/share/opencode   opencode run --session
     gm  Gemini CLI    ~/.gemini/tmp             gemini --session-file
 
 Usage:
@@ -61,6 +62,7 @@ PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
 CURSOR_DIR = os.path.join(HOME, ".cursor", "chats")
+OPENCODE_DIR = os.path.join(HOME, ".local", "share", "opencode")
 CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "agsearch")
 FRAG_DIR = os.path.join(CACHE_DIR, "frag")
 META_PATH = os.path.join(CACHE_DIR, "meta.json")
@@ -368,8 +370,8 @@ def _cursor_meta(chat_dir):
         return {}
 
 
-def _cursor_connect(path):
-    """Open store.db without ever taking a write lock on a chat Cursor may still be using."""
+def _sqlite_ro(path):
+    """Open a harness database without ever taking a write lock on one it may still be using."""
     import sqlite3
     for uri in ("file:%s?mode=ro" % path, "file:%s?immutable=1" % path):
         try:
@@ -402,7 +404,7 @@ def parse_cursor_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
     except (TypeError, ValueError, OSError):
         ts = ""
 
-    conn = _cursor_connect(path)
+    conn = _sqlite_ro(path)
     if conn is None:
         return sid, []
     rows = []
@@ -440,6 +442,70 @@ def parse_cursor_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
     return sid, [[sid, r[1], r[2], r[3], r[4], str(i), title, r[7], "cli"]
                  for i, r in enumerate(rows)]
 
+
+# ------------------------------------------------------------------ opencode
+
+# opencode keeps every session in one SQLite database rather than a file per session, so this
+# parser returns rows for all of them at once and the indexer registers each session it finds.
+# Message text lives in `part`, one row per span, with the role on the parent `message`.
+_OPENCODE_SQL = """
+SELECT p.session_id, m.data, p.data
+FROM part p JOIN message m ON p.message_id = m.id
+ORDER BY m.time_created, p.time_created, p.id
+"""
+_OPENCODE_SESSIONS = "SELECT id, directory, title, time_updated FROM session"
+
+
+def _opencode_iso(ms):
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ms / 1000.0)) if ms else ""
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def parse_opencode_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
+    """Parse the opencode database into the shared 9-field row schema, all sessions at once."""
+    conn = _sqlite_ro(path)
+    if conn is None:
+        return "", []
+
+    wanted = {"text", "reasoning"} if include_thinking else {"text"}
+    per_session = {}
+    try:
+        meta = {}
+        for sid, directory, title, updated in conn.execute(_OPENCODE_SESSIONS):
+            meta[sid] = (directory or "", _single_line(title or "", 90), _opencode_iso(updated))
+        for sid, mdata, pdata in conn.execute(_OPENCODE_SQL):
+            if sid not in meta:
+                continue
+            try:
+                part = json.loads(pdata)
+                msg = json.loads(mdata)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if not isinstance(part, dict) or part.get("type") not in wanted:
+                continue
+            role = msg.get("role") if isinstance(msg, dict) else None
+            if role not in ("user", "assistant"):
+                continue
+            text = _single_line(part.get("text") or "", limit)
+            if not text:
+                continue
+            per_session.setdefault(sid, []).append((role, text))
+    except Exception:            # a database mid-write is not worth crashing the whole index on
+        pass
+    finally:
+        conn.close()
+
+    rows = []
+    for sid, turns in per_session.items():
+        cwd, title, ts = meta.get(sid, ("", "", ""))
+        if not title:
+            title = next((t for r, t in turns if r == "user"), "")[:90]
+        for i, (role, text) in enumerate(turns):
+            rows.append([sid, cwd, "", ts, role, str(i), title, text, "cli"])
+    return (rows[0][0] if rows else ""), rows
+
 # ------------------------------------------------------------------ sources
 
 def _is_jsonl(name):
@@ -452,6 +518,10 @@ def _is_gemini_chat(name):
 
 def _is_cursor_store(name):
     return name == "store.db"
+
+
+def _is_opencode_db(name):
+    return name == "opencode.db"
 
 
 # One record per harness, keyed by the source tag stored in index.json. Everything that used to
@@ -494,12 +564,19 @@ SOURCES = {
         "resume": ("id", ["cursor-agent", "--resume", "{sid}"]),
         "subagents": False, "launch_dir": False,
     },
+    "opencode": {
+        "roots": [OPENCODE_DIR], "match": _is_opencode_db, "parse": None,
+        "tag": "oc", "label": "opencode", "colour": "33",
+        "resume": ("id", ["opencode", "run", "--session", "{sid}"]),
+        "subagents": False, "launch_dir": False,
+    },
 }
 
 SOURCES["cc"]["parse"] = parse_session
 SOURCES["codex"]["parse"] = parse_codex_session
 SOURCES["gemini"]["parse"] = parse_gemini_session
 SOURCES["cursor"]["parse"] = parse_cursor_session
+SOURCES["opencode"]["parse"] = parse_opencode_session
 
 DEFAULT_SOURCE = "cc"
 
@@ -770,11 +847,15 @@ def build_index(include_thinking=False, force=False):
         lines.extend(frag_lines)
         if not frag_lines:
             continue
-        sid0 = frag_lines[0].split(SEP, 1)[0]
         base = os.path.basename(path)
         if _source(source)["subagents"] and base.startswith("agent-"):
+            sid0 = frag_lines[0].split(SEP, 1)[0]
             sub_map.setdefault(sid0, []).append(path)     # subagent folds into parent
-        else:
+            continue
+        # Most harnesses write one file per session, but some keep every session in a single
+        # database. Register whatever sessions the fragment actually contains rather than
+        # assuming the first row speaks for the file.
+        for sid0 in dict.fromkeys(l.split(SEP, 1)[0] for l in frag_lines):
             index[sid0] = {"source": source, "path": path}
             if source == "cc":
                 root = (old_index.get(sid0) or {}).get("root")
@@ -1236,7 +1317,8 @@ def load_session_rows(sid, thinking=False, limit=MSG_INDEX_CHARS):
     tagged = []
     if path:
         _s, prows = rec["parse"](path, include_thinking=thinking, limit=limit)
-        tagged += [(r, False) for r in prows]
+        # A shared database hands back every session in the file; keep the one asked for.
+        tagged += [(r, False) for r in prows if r[0] == sid]
     if rec["subagents"]:
         try:
             submap = json.load(open(SUBMAP_PATH))

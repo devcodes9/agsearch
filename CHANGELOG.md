@@ -13,14 +13,21 @@ migration in the same line.
 
 ### Added
 
-- **Cursor and Gemini CLI sessions are indexed, searched and resumed** alongside Claude Code
-  and Codex, labelled `cu` and `gm`. Cursor keeps each chat as a SQLite store under
+- **Cursor, opencode and Gemini CLI sessions are indexed, searched and resumed** alongside
+  Claude Code and Codex, labelled `cu`, `oc` and `gm`. Cursor keeps each chat as a SQLite store under
   `~/.cursor/chats/`, opened read-only, reading message records and skipping the binary and
   image blobs beside them; it resumes with `cursor-agent --resume <id>`. Gemini keeps one JSON
   object per session under `~/.gemini/tmp/`, and resumes with `gemini --session-file <path>`
   because its `--resume` takes a project-scoped index number rather than a stable id.
+  opencode keeps every session in one database, so it also resumes by id
+  (`opencode run --session <id>`) but is read as a whole.
   On a 852-session corpus, adding 101 Cursor sessions moved held-out ranking by +0.004, so
   existing searches are unaffected.
+- **A transcript file may now hold more than one session.** The indexer took the first row's
+  id as the id for the entire file, which is right for a file per session and wrong for a
+  harness that keeps them all in one database: every session but the first was unreachable.
+  It now registers each session a file contains, and reading one filters to it. No change for
+  Claude Code, Codex, Cursor or Gemini, which write one session per file.
 
 ### Changed
 

@@ -7,7 +7,7 @@
 
 <p align="center">
   Ranked full-text search across the coding-agent sessions already on your machine.<br>
-  <strong>Claude Code</strong>, <strong>Codex</strong>, <strong>Cursor</strong> and <strong>Gemini CLI</strong>.
+  <strong>Claude Code</strong>, <strong>Codex</strong>, <strong>Cursor</strong>, <strong>opencode</strong> and <strong>Gemini CLI</strong>.
 </p>
 
 <p align="center">
@@ -42,9 +42,9 @@ uvx agsearch -n "stripe tax id"
 
 - **Full-conversation search.** Search user prompts and assistant replies, not only titles and
   session metadata.
-- **One list for every tool.** Sessions from all four agents appear together, labelled `cc`,
-  `cx`, `cu` and `gm`. Adding another agent is a parser plus one entry in the source table,
-  with no change to search or ranking.
+- **One list for every tool.** Sessions from all five agents appear together, labelled `cc`,
+  `cx`, `cu`, `oc` and `gm`. Adding another agent is a parser plus one entry in the source
+  table, with no change to search or ranking.
 - **Ranked results.** BM25 ranking favors focused sessions and shows matching lines in context.
 - **Preview, read, or resume.** Inspect a match, open the transcript in a pager, or return to the
   original session.
@@ -193,9 +193,10 @@ agsearch reads:
 | Claude Code | `~/.claude/projects/**/*.jsonl` | `claude --resume <id>` |
 | Codex | `~/.codex/sessions/**/*.jsonl` | `codex resume <id>` |
 | Cursor | `~/.cursor/chats/**/store.db` | `cursor-agent --resume <id>` |
+| opencode | `~/.local/share/opencode/opencode.db` | `opencode run --session <id>` |
 | Gemini CLI | `~/.gemini/tmp/**/chats/*.json` | `gemini --session-file <path>` |
 
-Cursor keeps each chat in a SQLite store; agsearch opens it read-only and reads message
+Cursor and opencode keep sessions in SQLite; agsearch opens those read-only and reads message
 records only. Gemini's `--resume` takes a project-scoped index number rather than a stable
 id, so resume goes through the transcript file instead.
 
