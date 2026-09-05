@@ -38,6 +38,16 @@ To run one search without installing anything:
 uvx agsearch -n "stripe tax id"
 ```
 
+And inside Claude Code, so Claude searches your past sessions itself rather than telling you
+it has no record of them:
+
+```
+/plugin marketplace add devcodes9/agsearch
+/plugin install agsearch@agsearch
+```
+
+[What that changes](#let-claude-search-for-you).
+
 ## Features
 
 - **Full-conversation search.** Search user prompts and assistant replies, not only titles and
