@@ -17,7 +17,6 @@ Usage:
     agsearch --thinking            # also index assistant thinking blocks
     agsearch --reindex             # force a full rebuild of the cache
     agsearch --version             # print the installed version and exit
-    agsearch --install-skill       # let Claude Code search these sessions itself
     agsearch _preview <sid> <seq> <thinking> <query...>   # (internal) fzf preview
 
 `-n` prints one entry per session, led by its session id, and drops colour when it is
@@ -25,10 +24,9 @@ not writing to a terminal — so a script or a coding agent can search, then rea
 with `agsearch read <session-id>`. Piped, ids shorten to a unique prefix, the columns
 lose their padding and `read` caps its output; a terminal sees none of that.
 
-`--install-skill` writes a Claude Code skill to ~/.claude/skills/agsearch/. With it,
-Claude searches your past sessions on its own when you refer to earlier work, instead
-of answering that it has no record of the conversation. The curl installer does this
-for you; brew and uv users run it once.
+Claude can drive that loop itself. `/plugin marketplace add devcodes9/agsearch` then
+`/plugin install agsearch@agsearch` installs a skill that searches these sessions when
+you refer to earlier work, instead of answering that it has no record of it.
 
 In the TUI the right pane previews the matched session, auto-scrolled to your match
 (marked ▶) with a "match N of M" header. Enter resumes the session (and copies your
@@ -1711,8 +1709,6 @@ def main(argv):
         render_transcript(argv[1] if len(argv) > 1 else "",
                           argv[2] if len(argv) > 2 else "0", " ".join(argv[3:]), color=True)
         return 0
-    if argv and argv[0] == "--install-skill":
-        return install_skill(force="--force" in argv[1:])
     if argv and argv[0] == "read":
         if len(argv) < 2 or not argv[1].strip():
             print("usage: agsearch read <session-id> [query]", file=sys.stderr)
@@ -1773,140 +1769,6 @@ def main(argv):
     if no_fzf:
         return print_matches(lines, query)
     return run_fzf(lines, query, thinking=thinking, no_resume=no_resume, fuzzy=fuzzy)
-
-
-SKILL_DIR = os.path.join(HOME, ".claude", "skills", "agsearch")
-
-# The skill text ships inside this script because that is the only copy every install channel
-# carries: brew and the curl installer put one file on your PATH, and a wheel has no data dir
-# worth the packaging. `skills/agsearch/SKILL.md` in the repo is the readable copy, and
-# tests/test_skill.py fails if the two drift. Regenerate with tools/sync-skill.py.
-SKILL_MD = """\
----
-name: agsearch
-description: Search past Claude Code and Codex sessions saved on this machine. Use when the user refers to earlier work ("what did we decide about X", "we hit this error before"), asks to continue or hand off work started in another session, or when you are about to say you have no record of a conversation that happened before this one.
----
-
-# agsearch
-
-Every Claude Code and Codex session on this machine is a transcript on disk. `agsearch`
-searches what was said inside them and prints ranked hits. You do not remember those
-sessions. The transcripts do.
-
-## Build the query from content words
-
-Pass the nouns, error strings and identifiers. Question words match hundreds of sessions
-and outweigh the two or three words that identify one.
-
-    user: what did we decide about the webhook retry backoff?
-    you:  agsearch -n "webhook retry backoff"
-
-Two to four content words is the target. On a 247-query benchmark, content words alone put
-the right session first 49% of the time; the same words left inside the question that carried
-them scored 10% to 22%.
-
-Pass the user's own vocabulary. Inflections and typos are handled, so `migration` finds
-`migrate` and a misspelling still ranks.
-
-## Read the results
-
-Each hit is one session: id, date, agent, matched/total terms, project, title, then the line
-that matched underneath.
-
-The top hit is usually the right session, not always. Read the matched line before trusting
-it, and name the session you are answering from so the user can check you.
-
-**Too many hits.** Add a content word. Narrowing beats paging: the output caps and reports how
-many it withheld.
-
-**No hits.** Drop to the single most distinctive word, usually an error string, a library name
-or an identifier. If that finds nothing, stop and say the conversation is not on this machine.
-That is a real answer, and a more useful one than a guess.
-
-Reach for the transcripts through `agsearch` rather than reading them directly. They are JSONL
-with tool calls, diffs and base64 attachments interleaved, so grepping them returns matches
-from machine noise rather than from anything anyone said.
-
-## Open a session
-
-    agsearch read <id>
-
-The id is the first field of a result row. Any unambiguous prefix works. Output is capped for
-you: you get the opening turns and the closing turns, which is what tells you the goal and the
-outcome.
-
-To find something specific inside a long session, pass the terms as well:
-
-    agsearch read <id> "retry backoff"
-
-The turns that matched are marked and are kept ahead of the ending when the cap applies.
-`--full` prints everything when you need the middle too.
-
-## Handoff
-
-When the user asks to continue work from an earlier session:
-
-1. Find the session with the search above.
-2. `agsearch read <id>`.
-3. Report the goal, what was already done, and where it stopped.
-4. Continue the work.
-
-Step 3 is done when you can state all three from the transcript. If any of them is a guess,
-read again with the terms you are missing, or with `--full`.
-
-Where the work left commits or a pull request, read those too: the transcript carries the
-reasoning and the discarded options, and git carries what actually shipped. Neither is the
-whole story on its own.
-
-This is not `claude --resume`. Resume moves you back into the old session in its own
-directory. Handoff brings that context forward into the session you are in now.
-
-## Scope a search
-
-    agsearch -n "..." --here             # sessions from this directory's project only
-    agsearch -n "..." --project myapp    # sessions whose path matches myapp
-
-Use these when a query returns the right topic from the wrong repository.
-
-## What this cannot do
-
-Matching is lexical, not semantic. A session that discussed an idea in different words will
-not surface, so a search returning nothing is weak evidence that a conversation never
-happened. Everything runs locally against files already on disk, and nothing leaves the
-machine.
-"""
-
-
-def install_skill(force=False):
-    """Write the skill where Claude Code looks for it.
-
-    Idempotent, and it keeps a file you edited: a skill is a document people tune, and
-    silently reverting someone's edit on an upgrade is worse than telling them it is stale.
-    """
-    path = os.path.join(SKILL_DIR, "SKILL.md")
-    if os.path.isfile(path):
-        try:
-            current = open(path, errors="replace").read()
-        except OSError:
-            current = None
-        if current == SKILL_MD:
-            print(f"already installed: {path}")
-            return 0
-        if not force:
-            print(f"{path} exists and differs from this version's skill.\n"
-                  f"Keeping your copy. Replace it with: agsearch --install-skill --force",
-                  file=sys.stderr)
-            return 1
-    try:
-        os.makedirs(SKILL_DIR, exist_ok=True)
-        with open(path, "w") as fh:
-            fh.write(SKILL_MD)
-    except OSError as e:
-        print(f"could not write {path}: {e}", file=sys.stderr)
-        return 1
-    print(f"installed: {path}")
-    print("Start a new Claude Code session to pick it up.")
-    return 0
 
 
 def _entry():

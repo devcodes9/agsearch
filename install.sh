@@ -7,7 +7,6 @@
 #   AGSEARCH_VERSION=v0.1.0 sh install.sh    # a specific release
 #   AGSEARCH_VERSION=main   sh install.sh    # unreleased tip, for testing
 #   PREFIX=/usr/local/bin   sh install.sh    # a different install location
-#   AGSEARCH_SKILL=0        sh install.sh    # skip the Claude Code skill
 set -eu
 
 REPO="devcodes9/agsearch"
@@ -76,30 +75,6 @@ if ! command -v fzf >/dev/null 2>&1; then
   echo "note: fzf is not installed — the interactive TUI needs it."
   echo "      fzf 0.35 or newer: https://github.com/junegunn/fzf#installation"
   echo "      (agsearch -n \"query\" works without fzf)"
-fi
-
-# The skill is what lets a coding agent search these transcripts itself, so the one-line
-# install should deliver it too. Taken from the checkout when there is one, fetched otherwise:
-# this script never executes the binary it just downloaded, and a pinned older release has no
-# --install-skill to call.
-if [ "${AGSEARCH_SKILL:-1}" != "0" ]; then
-  SKILL_REF="${AGSEARCH_VERSION:-main}"
-  SKILL_DIR="$HOME/.claude/skills/agsearch"
-  SKILL_URL="https://raw.githubusercontent.com/$REPO/$SKILL_REF/skills/agsearch/SKILL.md"
-  if [ -f "$SKILL_DIR/SKILL.md" ]; then
-    echo "note: $SKILL_DIR/SKILL.md exists — leaving it alone."
-    echo "      to replace it: agsearch --install-skill --force"
-  elif { [ -f "./skills/agsearch/SKILL.md" ] && [ -z "${AGSEARCH_VERSION:-}" ] &&
-         cp "./skills/agsearch/SKILL.md" "$TARGET.skill"; } ||
-       { curl -fsSL "$SKILL_URL" -o "$TARGET.skill" 2>/dev/null &&
-         head -n 1 "$TARGET.skill" | grep -q '^---$'; }; then
-    mkdir -p "$SKILL_DIR"
-    mv "$TARGET.skill" "$SKILL_DIR/SKILL.md"
-    echo "installed skill: $SKILL_DIR/SKILL.md (start a new Claude Code session to pick it up)"
-  else
-    rm -f "$TARGET.skill"
-    echo "note: could not fetch the Claude Code skill. Install it later: agsearch --install-skill"
-  fi
 fi
 
 echo "done. run: agsearch"

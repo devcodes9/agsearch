@@ -1,0 +1,15 @@
+{
+  "name": "agsearch",
+  "owner": {
+    "name": "Dev Dalia",
+    "url": "https://github.com/devcodes9"
+  },
+  "plugins": [
+    {
+      "name": "agsearch",
+      "source": "./",
+      "description": "Search your past Claude Code and Codex sessions from inside Claude"
+    }
+  ],
+  "description": "agsearch: search your past Claude Code and Codex sessions from inside Claude"
+}

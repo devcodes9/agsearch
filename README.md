@@ -49,8 +49,8 @@ uvx agsearch -n "stripe tax id"
 - **Ranked results.** BM25 ranking favors focused sessions and shows matching lines in context.
 - **Preview, read, or resume.** Inspect a match, open the transcript in a pager, or return to the
   original session.
-- **Your agent can search too.** A one-command Claude Code skill, so Claude finds the earlier
-  conversation itself instead of answering that it has no record of it.
+- **Your agent can search too.** A Claude Code skill, so Claude finds the earlier conversation
+  itself instead of answering that it has no record of it.
 - **Fully local.** No uploads, API keys, hosted index, or network calls.
 - **Fast warm searches.** A per-file cache reparses only transcripts that changed.
 
@@ -101,7 +101,6 @@ agsearch --thinking "query"    # include assistant thinking blocks
 agsearch --no-resume "query"   # print the selected resume command
 agsearch --reindex             # rebuild the transcript cache
 agsearch --version             # print the installed version
-agsearch --install-skill       # install the Claude Code skill
 ```
 
 ### Scripts and coding agents
@@ -121,14 +120,15 @@ it. A terminal sees none of that.
 
 ### Let Claude search for you
 
-The curl installer sets this up. Homebrew and uv users run it once:
+agsearch ships a Claude Code skill. Install it from inside Claude Code:
 
-```sh
-agsearch --install-skill
+```
+/plugin marketplace add devcodes9/agsearch
+/plugin install agsearch@agsearch
 ```
 
-That writes a skill to `~/.claude/skills/agsearch/`. From the next session on, Claude searches
-your transcripts itself when you refer to work from an earlier conversation:
+From the next session on, Claude searches your transcripts itself when you refer to work from
+an earlier conversation:
 
 > **you:** what did we decide about the webhook retry backoff?
 >
@@ -139,8 +139,13 @@ session in its own directory; the skill carries that session's context forward i
 are in now, so you can pick the work up in a different repository or on a different branch.
 
 The skill is [a single markdown file](https://github.com/devcodes9/agsearch/blob/main/skills/agsearch/SKILL.md).
-Read it before you install it, and edit your copy freely: upgrades leave an edited skill alone
-and tell you it is stale.
+Read it before installing. If you would rather not add a marketplace, copy it instead:
+
+```sh
+mkdir -p ~/.claude/skills && cp -r skills/agsearch ~/.claude/skills/
+```
+
+Either way it needs the `agsearch` binary, which the installation section above covers.
 
 ### Interactive keys
 
