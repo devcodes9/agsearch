@@ -39,13 +39,35 @@ jobs:
             echo "::notice::See docs/packaging/homebrew.md to finish tap setup."
           fi
 
-      - uses: mislav/bump-homebrew-formula-action@v3
+      # Done with `gh api` rather than a bump action. The action failed with an
+      # opaque "unexpected HTTP 303": it falls back to fork-and-PR when it cannot
+      # detect push access, and a fine-grained PAT does not report permissions the
+      # way it expects, so it tried to fork a repo the token already owns. The
+      # operation is three steps, and doing them here means the next failure names
+      # itself.
+      - name: Bump the formula
         if: steps.gate.outputs.ready == 'true'
-        with:
-          formula-name: agsearch
-          formula-path: Formula/agsearch.rb
-          homebrew-tap: devcodes9/homebrew-tap
-          tag-name: ${{ github.event.inputs.tag || github.ref_name }}
-          download-url: https://github.com/devcodes9/agsearch/archive/refs/tags/${{ github.event.inputs.tag || github.ref_name }}.tar.gz
         env:
-          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAP: devcodes9/homebrew-tap
+          FORMULA: Formula/agsearch.rb
+        run: |
+          set -euo pipefail
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          sha="$(curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1)"
+          echo "tag=$TAG sha256=$sha"
+
+          gh api "repos/$TAP/contents/$FORMULA" --jq .content | base64 -d > formula.rb
+          blob="$(gh api "repos/$TAP/contents/$FORMULA" --jq .sha)"
+
+          sed -i "s|url \"[^\"]*\"|url \"$url\"|" formula.rb
+          sed -i "s|sha256 \"[0-9a-f]\{64\}\"|sha256 \"$sha\"|" formula.rb
+          grep -q "$url" formula.rb || { echo "url substitution failed"; exit 1; }
+          grep -q "$sha" formula.rb || { echo "sha256 substitution failed"; exit 1; }
+
+          gh api -X PUT "repos/$TAP/contents/$FORMULA" \
+            -f message="agsearch ${TAG#v}" \
+            -f content="$(base64 -w0 formula.rb)" \
+            -f sha="$blob" >/dev/null
+          echo "bumped $TAP to $TAG"
