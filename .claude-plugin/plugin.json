@@ -1,7 +1,7 @@
 {
   "name": "agsearch",
   "description": "Search your past Claude Code, Codex, Cursor, opencode and Gemini CLI sessions from inside Claude",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": { "name": "Dev Dalia" },
   "homepage": "https://github.com/devcodes9/agsearch",
   "license": "MIT"

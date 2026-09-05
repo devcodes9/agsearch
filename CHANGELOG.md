@@ -9,89 +9,83 @@ While agsearch is on `0.x`, the CLI surface may still change between minor
 versions. Anything that changes it will be listed under **Changed** with the
 migration in the same line.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-05
+
+Four more coding agents, and the transcript reader stops attributing machine
+output to you.
 
 ### Added
 
 - **Cursor, opencode and Gemini CLI sessions are indexed, searched and resumed** alongside
-  Claude Code and Codex. Cursor keeps each chat as a SQLite store under
-  `~/.cursor/chats/`, opened read-only, reading message records and skipping the binary and
-  image blobs beside them; it resumes with `cursor-agent --resume <id>`. Gemini keeps one JSON
-  object per session under `~/.gemini/tmp/`, and resumes with `gemini --session-file <path>`
-  because its `--resume` takes a project-scoped index number rather than a stable id.
-  opencode keeps every session in one database, so it also resumes by id
-  (`opencode --session <id>`) but is read as a whole.
-  On a 852-session corpus, adding 101 Cursor sessions moved held-out ranking by +0.004, so
-  existing searches are unaffected.
-- **A transcript file may now hold more than one session.** The indexer took the first row's
-  id as the id for the entire file, which is right for a file per session and wrong for a
-  harness that keeps them all in one database: every session but the first was unreachable.
-  It now registers each session a file contains, and reading one filters to it. No change for
-  Claude Code, Codex, Cursor or Gemini, which write one session per file.
+  Claude Code and Codex, and every result resumes in the tool that created it. Cursor is read
+  from the JSONL transcripts under `~/.cursor/projects` rather than the SQLite store beside
+  them: the transcripts cover more sessions and carry only the conversation, where the store
+  also holds the hook and environment context injected around it. opencode keeps every session
+  in one SQLite database, opened read-only. Gemini resumes through `--session-file`, because
+  its `--resume` takes a project-scoped index number rather than a stable id.
+- **A transcript file may hold more than one session.** The indexer took the first row's id as
+  the id for the whole file, which is right for a file per session and wrong for opencode,
+  which keeps them all in one database: every session but the first was unreachable. It now
+  registers each session a file contains, and reading one filters to it.
+- **A Claude Code skill**, installed as a plugin (`/plugin marketplace add devcodes9/agsearch`,
+  then `/plugin install agsearch@agsearch`). With it Claude searches your transcripts itself
+  when you refer to earlier work, rather than answering that it has no record of the
+  conversation, and it can carry an old session's context forward into the session you are in
+  now, which resuming cannot do. The skill teaches query construction because that is where an
+  agent fails: on a 247-query benchmark, content words alone rank the right session first 49%
+  of the time, and the same words left inside the question that carried them score 10% to 22%.
+- **`agsearch read <session-id>`** prints a whole conversation without resuming it. It was
+  already there as the TUI's <kbd>Ctrl-O</kbd>, reachable only as an internal subcommand; it is
+  now a documented command, so a search hit can actually be opened.
+- **Forked sessions are marked `fork`** ahead of the title, in the list and in the preview and
+  `read` headers alike, and those headers also name the branch a fork came from and the message
+  the two split at. Claude Code forks a conversation by copying the transcript into a new file
+  under a new session id and records nothing that says so, so the two branches sat in the list
+  as unrelated rows with the same title, the same project and the same opening prompt. Picking
+  the wrong one resumes a branch missing everything after the split. Detection reads the only
+  trace the format leaves: copied messages keep the uuids they had in the original. Claude Code
+  sessions only, and it costs one extra partial read per new transcript.
 
 ### Changed
 
-- **The source column spells the tool out** (`claude`, `codex`, `cursor`, `opencode`,
-  `gemini`) instead of a two-letter code. `cc` and `cx` were guessable with two harnesses and
-  are not with five. The name is now stored once per harness and used for the column, the
-  assistant turn label and the preview, so those cannot drift apart, and the column width is
-  derived from the longest name so adding a harness cannot misalign the list.
-
+- **The source column spells the tool out** (`claude`, `codex`, `cursor-cli`, `opencode`,
+  `gemini-cli`) instead of a two-letter code. `cc` and `cx` were guessable with two harnesses
+  and are not with five. `cursor-cli` and `gemini-cli` say which of the two products they mean:
+  chats made in the Cursor IDE live elsewhere and are not indexed. Each name is stored once and
+  used for the column, the assistant turn label and the preview, so they cannot drift apart,
+  and the column width comes from the longest name.
+- **A tool's output is no longer attributed to you.** Claude Code files tool results under the
+  user's role, and nine in ten user-role entries are one, so reading a session showed `▌ you`
+  above "The file has been updated successfully". They now read `▌ tool`. Still indexed: the
+  error string a search has to find lives in tool output rather than in anything anyone typed.
+- **Content the harness injects is no longer indexed as conversation.** An invoked skill writes
+  its whole SKILL.md into the transcript as a user turn, up to 15k characters, and Cursor wraps
+  user turns in environment and hook context. Reading a long session spent its budget on that
+  and elided the turns that actually matched.
 - **Harnesses are described by one source table instead of a ternary in five places.** Adding
   an agent was supposed to be one line, but the file extension, the parser used for preview,
   the row label, the preview label and the resume command each decided for themselves what a
   source was, and two of them had already drifted (`codex` against `cx`). They now read one
   record per harness, so a new agent is a parser plus one entry. Behaviour for Claude Code and
   Codex is unchanged; the cache format bumps to 7 and reindexes once on first run.
-
 - **Piped output is shaped for the program reading it.** `-n` and `read` are what a coding
   agent sees, and an agent pays per character for what a terminal gets free. Behind the same
   not-a-terminal test the colour seam already uses: session ids shorten to the shortest prefix
   that still tells every indexed session apart (git's rule, floored at 12 because Codex writes
   time-ordered uuidv7 and 8 characters collide), column padding is dropped, and the output ends
-  by naming `agsearch read`. A 20-result search goes from 5748 to 5111 bytes, and further in
-  tokens. `read` accepts any unambiguous id prefix and reports how many sessions an ambiguous
-  one matched. A terminal sees exactly what it saw before.
+  by naming `agsearch read`. A terminal sees exactly what it saw before.
 - **A piped `read` caps at 12k characters**, keeping the opening turns and as many closing ones
   as fit, because a session is read to learn what the work was and where it stopped. The
   elision names what it dropped and how to get it. `--full`, and any terminal, is uncapped.
-
-- **`-n` now runs the same ranker as the interactive list.** It was a separate path: an
-  AND of raw substrings over *message* rows, sorted by date. That meant no BM25, no
-  stemming, no typo tier, no demotion of SDK-spawned runs, and one session repeated once
-  per matching message. `-n` is also the README's zero-install first command and the
-  fallback when fzf is missing, so the surface most new users met was the unranked one.
-  It now returns ranked sessions, one entry each. Output shape changed with it: the
-  session id leads the line, and the matching text sits indented below it. Cost of the
-  shared path is ~0.7s per `-n` run against a 400-session corpus, up from ~0.25s,
-  because it builds the same per-session index the list uses.
-
-### Added
-
-- **A Claude Code skill**, installed as a plugin (`/plugin marketplace add devcodes9/agsearch`,
-  then `/plugin install agsearch@agsearch`) or by copying `skills/agsearch/` into
-  `~/.claude/skills/`. With it Claude searches your transcripts itself when you refer to
-  earlier work, rather than answering that it has no record of the conversation, and it can
-  carry an old session's context forward into the session you are in now, which resuming
-  cannot do. The skill teaches query construction because that is where an agent fails: on a
-  247-query benchmark, content words alone rank the right session first 49% of the time, and
-  the same words left inside the question that carried them score 10% to 22%.
-
-- **`agsearch read <session-id>`** prints a whole conversation without resuming it. This
-  was already there as the TUI's <kbd>Ctrl-O</kbd>, reachable only as an internal
-  subcommand; it is now a documented command, so a search hit can actually be opened.
-- **Colour only when a terminal is reading.** `-n` and `read` emit plain text when stdout
-  is a pipe, or when `NO_COLOR` is set. Escape sequences quoted inside a transcript are
-  stripped too, including ones the snippet cut in half.
-- **Forked sessions are marked `fork`** ahead of the title, in the list and in the preview
-  and `read` headers alike, and those headers also name the branch a fork came from and
-  the message the two split at. Claude Code forks a
-  conversation by copying the transcript into a new file under a new session id and
-  records nothing that says so, so the two branches sat in the list as unrelated rows
-  with the same title, the same project and the same opening prompt. Picking the wrong
-  one resumes a branch missing everything after the split. Detection reads the only
-  trace the format leaves: copied messages keep the uuids they had in the original.
-  Claude Code sessions only, and it costs one extra partial read per new transcript.
+- **`-n` now runs the same ranker as the interactive list.** It was a separate path: an AND of
+  raw substrings over *message* rows, sorted by date. That meant no BM25, no stemming, no typo
+  tier, no demotion of SDK-spawned runs, and one session repeated once per matching message.
+  `-n` is also the README's zero-install first command and the fallback when fzf is missing, so
+  the surface most new users met was the unranked one. It now returns ranked sessions, one
+  entry each, the session id leading the line and the matching text indented below it.
+- **Colour only when a terminal is reading.** `-n` and `read` emit plain text when stdout is a
+  pipe, or when `NO_COLOR` is set. Escape sequences quoted inside a transcript are stripped
+  too, including ones the snippet cut in half.
 
 ## [0.1.1] - 2026-08-22
 
@@ -148,6 +142,7 @@ version you can name, install reproducibly, and report a bug against.
   have no cross-session search" but that they search titles while agsearch
   searches what was said.
 
-[Unreleased]: https://github.com/devcodes9/agsearch/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/devcodes9/agsearch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/devcodes9/agsearch/releases/tag/v0.2.0
 [0.1.1]: https://github.com/devcodes9/agsearch/releases/tag/v0.1.1
 [0.1.0]: https://github.com/devcodes9/agsearch/releases/tag/v0.1.0

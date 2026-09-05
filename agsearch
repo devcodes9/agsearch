@@ -44,7 +44,7 @@ Warm runs are near-instant: parsed sessions are cached per-file and only re-pars
 when their .jsonl mtime changes.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 import os
 import re
