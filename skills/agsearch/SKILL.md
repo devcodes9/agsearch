@@ -9,6 +9,16 @@ Every Claude Code and Codex session on this machine is a transcript on disk. `ag
 searches what was said inside them and prints ranked hits. You do not remember those
 sessions. The transcripts do.
 
+## Before the first search
+
+This skill drives the `agsearch` command. If it is not on the PATH, say so once and stop
+searching:
+
+    agsearch is not installed. Install it with `brew install devcodes9/tap/agsearch`,
+    or run a single search with `uvx agsearch -n "..."`.
+
+Retrying, or reading the transcripts some other way, wastes turns and gets worse answers.
+
 ## Build the query from content words
 
 Pass the nouns, error strings and identifiers. Question words match hundreds of sessions
