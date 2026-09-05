@@ -48,8 +48,16 @@ it, and name the session you are answering from so the user can check you.
 many it withheld.
 
 **No hits.** Drop to the single most distinctive word, usually an error string, a library name
-or an identifier. If that finds nothing, stop and say the conversation is not on this machine.
-That is a real answer, and a more useful one than a guess.
+or an identifier.
+
+If that finds nothing, ask the user which repository the work was in, then retry with
+`--project`. Ask for the repository rather than the date: people recall a repo far better than
+a week, and on a 247-query measurement it recovered about as many missed sessions (31% against
+38% for a date window that has to be right to within seven days; a month-wide window recovered
+13%, and a quarter-wide one nothing).
+
+Say the conversation is not on this machine only after an *unfiltered* search came back empty,
+and name the window you searched.
 
 ## Open a session
 
@@ -91,6 +99,10 @@ directory. Handoff brings that context forward into the session you are in now.
     agsearch -n "..." --project myapp    # sessions whose path matches myapp
 
 Use these when a query returns the right topic from the wrong repository.
+
+A filter can remove the very session you are looking for, turning a buried result into a
+confident "not found". If a filtered search returns nothing, drop the filter and search again.
+Never conclude that a conversation does not exist from a filtered search.
 
 ## What this cannot do
 
