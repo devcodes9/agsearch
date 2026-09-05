@@ -11,7 +11,38 @@ migration in the same line.
 
 ## [Unreleased]
 
+### Added
+
+- **Cursor, opencode and Gemini CLI sessions are indexed, searched and resumed** alongside
+  Claude Code and Codex. Cursor keeps each chat as a SQLite store under
+  `~/.cursor/chats/`, opened read-only, reading message records and skipping the binary and
+  image blobs beside them; it resumes with `cursor-agent --resume <id>`. Gemini keeps one JSON
+  object per session under `~/.gemini/tmp/`, and resumes with `gemini --session-file <path>`
+  because its `--resume` takes a project-scoped index number rather than a stable id.
+  opencode keeps every session in one database, so it also resumes by id
+  (`opencode --session <id>`) but is read as a whole.
+  On a 852-session corpus, adding 101 Cursor sessions moved held-out ranking by +0.004, so
+  existing searches are unaffected.
+- **A transcript file may now hold more than one session.** The indexer took the first row's
+  id as the id for the entire file, which is right for a file per session and wrong for a
+  harness that keeps them all in one database: every session but the first was unreachable.
+  It now registers each session a file contains, and reading one filters to it. No change for
+  Claude Code, Codex, Cursor or Gemini, which write one session per file.
+
 ### Changed
+
+- **The source column spells the tool out** (`claude`, `codex`, `cursor`, `opencode`,
+  `gemini`) instead of a two-letter code. `cc` and `cx` were guessable with two harnesses and
+  are not with five. The name is now stored once per harness and used for the column, the
+  assistant turn label and the preview, so those cannot drift apart, and the column width is
+  derived from the longest name so adding a harness cannot misalign the list.
+
+- **Harnesses are described by one source table instead of a ternary in five places.** Adding
+  an agent was supposed to be one line, but the file extension, the parser used for preview,
+  the row label, the preview label and the resume command each decided for themselves what a
+  source was, and two of them had already drifted (`codex` against `cx`). They now read one
+  record per harness, so a new agent is a parser plus one entry. Behaviour for Claude Code and
+  Codex is unchanged; the cache format bumps to 7 and reindexes once on first run.
 
 - **Piped output is shaped for the program reading it.** `-n` and `read` are what a coding
   agent sees, and an agent pays per character for what a terminal gets free. Behind the same
