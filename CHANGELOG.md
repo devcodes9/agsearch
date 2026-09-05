@@ -14,7 +14,7 @@ migration in the same line.
 ### Added
 
 - **Cursor, opencode and Gemini CLI sessions are indexed, searched and resumed** alongside
-  Claude Code and Codex, labelled `cu`, `oc` and `gm`. Cursor keeps each chat as a SQLite store under
+  Claude Code and Codex. Cursor keeps each chat as a SQLite store under
   `~/.cursor/chats/`, opened read-only, reading message records and skipping the binary and
   image blobs beside them; it resumes with `cursor-agent --resume <id>`. Gemini keeps one JSON
   object per session under `~/.gemini/tmp/`, and resumes with `gemini --session-file <path>`
@@ -30,6 +30,12 @@ migration in the same line.
   Claude Code, Codex, Cursor or Gemini, which write one session per file.
 
 ### Changed
+
+- **The source column spells the tool out** (`claude`, `codex`, `cursor`, `opencode`,
+  `gemini`) instead of a two-letter code. `cc` and `cx` were guessable with two harnesses and
+  are not with five. The name is now stored once per harness and used for the column, the
+  assistant turn label and the preview, so those cannot drift apart, and the column width is
+  derived from the longest name so adding a harness cannot misalign the list.
 
 - **Harnesses are described by one source table instead of a ternary in five places.** Adding
   an agent was supposed to be one line, but the file extension, the parser used for preview,

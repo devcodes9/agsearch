@@ -23,18 +23,16 @@ C_SID, C_CWD, C_BRANCH, C_TS, C_ROLE, C_SEQ, C_TITLE, C_TEXT, C_KIND = range(9)
 
 class RegistryTests(unittest.TestCase):
     def test_every_source_is_complete(self):
-        keys = {"roots", "match", "parse", "tag", "label", "colour", "resume",
+        keys = {"roots", "match", "parse", "label", "colour", "resume",
                 "subagents", "launch_dir"}
         for name, rec in ag.SOURCES.items():
             self.assertEqual(keys, set(rec), name)
             self.assertTrue(callable(rec["parse"]), name)
             self.assertTrue(callable(rec["match"]), name)
 
-    def test_tags_are_unique_and_two_chars(self):
-        tags = [r["tag"] for r in ag.SOURCES.values()]
-        self.assertEqual(len(tags), len(set(tags)))
-        for t in tags:
-            self.assertEqual(2, len(t))
+    def test_names_are_unique(self):
+        names = [r["label"] for r in ag.SOURCES.values()]
+        self.assertEqual(len(names), len(set(names)))
 
     def test_resume_templates_use_a_known_placeholder(self):
         for name, rec in ag.SOURCES.items():
@@ -42,12 +40,18 @@ class RegistryTests(unittest.TestCase):
             self.assertIn(kind, ("id", "path"), name)
             self.assertTrue(any("{sid}" in a or "{path}" in a for a in argv), name)
 
-    def test_column_mark_matches_the_turn_tag(self):
+    def test_column_mark_matches_the_turn_name(self):
         """The list column and the assistant-turn label used to be written out separately and
         had drifted. They are now the same string by construction."""
         for name, rec in ag.SOURCES.items():
-            self.assertIn(rec["tag"], ag._SRC_MARK[name])
-            self.assertEqual(rec["tag"], ag._agent_tag(name))
+            self.assertIn(rec["label"], ag._SRC_MARK[name])
+            self.assertEqual(rec["label"], ag._agent_name(name))
+
+    def test_source_column_fits_the_longest_name(self):
+        """Every row aligns on this column, so a harness whose name overflows it would ragged
+        the whole list."""
+        for rec in ag.SOURCES.values():
+            self.assertLessEqual(len(rec["label"]), ag.SOURCE_COL)
 
     def test_unknown_source_falls_back_to_claude(self):
         self.assertIs(ag._source("harness-from-the-future"), ag.SOURCES["cc"])

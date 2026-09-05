@@ -42,8 +42,8 @@ uvx agsearch -n "stripe tax id"
 
 - **Full-conversation search.** Search user prompts and assistant replies, not only titles and
   session metadata.
-- **One list for every tool.** Sessions from all five agents appear together, labelled `cc`,
-  `cx`, `cu`, `oc` and `gm`. Adding another agent is a parser plus one entry in the source
+- **One list for every tool.** Sessions from all five agents appear together, each row named
+  after the tool it came from. Adding another agent is a parser plus one entry in the source
   table, with no change to search or ranking.
 - **Ranked results.** BM25 ranking favors focused sessions and shows matching lines in context.
 - **Preview, read, or resume.** Inspect a match, open the transcript in a pager, or return to the

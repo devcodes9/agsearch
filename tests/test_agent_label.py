@@ -1,7 +1,7 @@
-"""A Codex session marked `cx` in the list must not call itself `cc` everywhere else.
+"""A Codex session marked `codex` in the list must not call itself `claude` everywhere else.
 
 The list column is keyed on the session's source, but the row and preview role labels used to
-hardcode `cc` for every assistant turn. On a Codex session the two disagreed on screen, which
+hardcode `claude` for every assistant turn. On a Codex session the two disagreed on screen, which
 reads as "the preview is showing me a different session".
 """
 
@@ -30,21 +30,21 @@ def row(role, text, sid="s1", ts="2026-08-19T00:00:00", title="Session title"):
 
 class AgentTagTests(unittest.TestCase):
     def test_codex_is_cx_and_claude_is_cc(self):
-        self.assertEqual(ag._agent_tag("codex"), "cx")
-        self.assertEqual(ag._agent_tag("cc"), "cc")
+        self.assertEqual(ag._agent_name("codex"), "codex")
+        self.assertEqual(ag._agent_name("cc"), "claude")
 
     def test_unknown_source_falls_back_to_cc(self):
-        self.assertEqual(ag._agent_tag(""), "cc")
-        self.assertEqual(ag._agent_tag(None), "cc")
+        self.assertEqual(ag._agent_name(""), "claude")
+        self.assertEqual(ag._agent_name(None), "claude")
 
 
 class LabelTests(unittest.TestCase):
     """The preview names the agent in the turn gutter, so these assert the
     rendered gutter rather than a label helper. The list and `-n` paths keep the
-    two-character `cc`/`cx` form; only the preview spells the agent out.
+    harness name, the same one the preview uses.
 
-    `-n` lists sessions rather than messages, so it has no per-turn role to name; its `cc`/`cx`
-    comes from the session's source via _agent_tag, covered by AgentTagTests above."""
+    `-n` lists sessions rather than messages, so it has no per-turn role to name; its source
+    comes from the session's source via _agent_name, covered by AgentTagTests above."""
 
     def _gutter(self, source):
         # _preview_lines takes split rows, not the SEP-joined strings row() builds.

@@ -7,11 +7,11 @@ Every coding agent keeps its sessions on disk. Their native pickers search sessi
 across all of them at once, and drops you back into the session with that tool's own
 resume command.
 
-    cc  Claude Code   ~/.claude/projects        claude --resume
-    cx  Codex         ~/.codex/sessions         codex resume
-    cu  Cursor        ~/.cursor/chats           cursor-agent --resume
-    oc  opencode      ~/.local/share/opencode   opencode --session
-    gm  Gemini CLI    ~/.gemini/tmp             gemini --session-file
+    claude     ~/.claude/projects        claude --resume
+    codex      ~/.codex/sessions         codex resume
+    cursor     ~/.cursor/chats           cursor-agent --resume
+    opencode   ~/.local/share/opencode   opencode --session
+    gemini     ~/.gemini/tmp             gemini --session-file
 
 Usage:
     agsearch                       # interactive fuzzy TUI (needs fzf)
@@ -531,8 +531,7 @@ def _is_opencode_db(name):
 #   roots    directories to walk for transcripts
 #   match    filename predicate; harnesses do not agree on an extension
 #   parse    (path, include_thinking, limit) -> (sid, rows) in the shared 9-field schema
-#   tag      2-char label for the source column and assistant turns
-#   label    what the preview calls the agent side
+#   label    the harness name, used for the source column, assistant turns and the preview
 #   colour   SGR code for the source column
 #   resume   ("id", argv) substitutes {sid}; ("path", argv) substitutes {path}
 #   subagents   harness writes separate subagent transcripts that fold into the parent
@@ -540,19 +539,19 @@ def _is_opencode_db(name):
 SOURCES = {
     "cc": {
         "roots": [PROJECTS_DIR], "match": _is_jsonl, "parse": None,
-        "tag": "cc", "label": "claude", "colour": "34",
+        "label": "claude", "colour": "34",
         "resume": ("id", ["claude", "--resume", "{sid}"]),
         "subagents": True, "launch_dir": True,
     },
     "codex": {
         "roots": [CODEX_DIR], "match": _is_jsonl, "parse": None,
-        "tag": "cx", "label": "codex", "colour": "35",
+        "label": "codex", "colour": "35",
         "resume": ("id", ["codex", "resume", "{sid}"]),
         "subagents": False, "launch_dir": False,
     },
     "gemini": {
         "roots": [GEMINI_DIR], "match": _is_gemini_chat, "parse": None,
-        "tag": "gm", "label": "gemini", "colour": "36",
+        "label": "gemini", "colour": "36",
         # --resume takes a project-scoped index number, which is not a stable handle for a
         # session found by search. --session-file takes the transcript path, which is.
         "resume": ("path", ["gemini", "--session-file", "{path}"]),
@@ -560,13 +559,13 @@ SOURCES = {
     },
     "cursor": {
         "roots": [CURSOR_DIR], "match": _is_cursor_store, "parse": None,
-        "tag": "cu", "label": "cursor", "colour": "32",
+        "label": "cursor", "colour": "32",
         "resume": ("id", ["cursor-agent", "--resume", "{sid}"]),
         "subagents": False, "launch_dir": False,
     },
     "opencode": {
         "roots": [OPENCODE_DIR], "match": _is_opencode_db, "parse": None,
-        "tag": "oc", "label": "opencode", "colour": "33",
+        "label": "opencode", "colour": "33",
         # `opencode run` is the non-interactive form and demands a message; the bare command
         # opens the TUI on that session, which is what resuming means here.
         "resume": ("id", ["opencode", "--session", "{sid}"]),
@@ -913,13 +912,15 @@ def _highlight(text, terms, code="\033[1;30;43m"):
 ROW_TEXT_WIDTH = 160        # the "why it matched" line under a result, however big the message was
 
 
-def _agent_tag(source):
-    """Name the agent side of a session after the tool it came from: cc, cx, gm, cu.
+def _agent_name(source):
+    """Name the agent side of a session after the tool it came from.
 
-    The session list already marks the source that way, so a row or preview line that calls
-    every assistant turn `cc` contradicts the column two inches to its left.
+    The session list marks the source with the same name, so a row or preview line that calls
+    every assistant turn `claude` contradicts the column two inches to its left. Spelled out
+    rather than abbreviated: two-letter codes were guessable with two harnesses and are not
+    with five.
     """
-    return _source(source)["tag"]
+    return _source(source)["label"]
 
 
 AGENT_ID_MIN = 12       # git's short-hash rule; see _short_id_len for why 8 is not enough
@@ -951,11 +952,11 @@ def _match_entry(f, matched, total, texts, keys, idlen=36, pad=True):
     neither the padding nor the full id: alignment buys an agent nothing and every run of
     spaces costs it a token.
     """
-    tag = "auto" if f[C_KIND] == "auto" else _agent_tag(f[C_SOURCE])
+    tag = "auto" if f[C_KIND] == "auto" else _agent_name(f[C_SOURCE])
     badge = f"{matched}/{total}" if total else ""
     proj = short_proj(f[C_CWD])[:20]
     if pad:
-        head = (f"{f[C_SID]}  {f[C_DATE]}  {tag:<4} {badge:<4} "
+        head = (f"{f[C_SID]}  {f[C_DATE]}  {tag:<{SOURCE_COL}} {badge:<4} "
                 f"\033[36m{proj:<20}\033[0m  {f[C_TITLE][:60]}")
     else:
         head = (f"{f[C_SID][:idlen]} {f[C_DATE]} {tag} {badge} "
@@ -1698,9 +1699,12 @@ def _fuzzy_span(hay, term):
 
 # Derived from SOURCES so the column and the assistant-turn label can never disagree about
 # what a harness is called. They used to be written out separately, and had already drifted.
-_SRC_MARK = {name: "\033[%sm%-4s\033[0m" % (rec["colour"], rec["tag"])
+# Width of the source column, from the longest harness name, so adding one cannot misalign
+# every row below it.
+SOURCE_COL = max([len("auto")] + [len(r["label"]) for r in SOURCES.values()])
+_SRC_MARK = {name: "\033[%sm%-*s\033[0m" % (rec["colour"], SOURCE_COL, rec["label"])
              for name, rec in SOURCES.items()}
-_AUTO_MARK = "\033[90mauto\033[0m"          # plugin/SDK-spawned run, never your own typing
+_AUTO_MARK = "\033[90m%-*s\033[0m" % (SOURCE_COL, "auto")   # plugin/SDK-spawned, not your typing
 _LIVE_MARK = "\033[1;31m●\033[0m "           # session still being written to → probably running
 # Informational only: the session still resumes (from the nearest surviving ancestor dir),
 # so this is muted enough to read as a footnote rather than a warning.
@@ -1749,7 +1753,7 @@ def _missing_dirs(cwds):
 
 def _row(sid, cwd, date, source, kind, title, badge, active=False, dir_gone=False,
          forked=False):
-    mark = _AUTO_MARK if kind == "auto" else _SRC_MARK.get(source, "    ")
+    mark = _AUTO_MARK if kind == "auto" else _SRC_MARK.get(source, " " * SOURCE_COL)
     live = _LIVE_MARK if active else "  "
     forkm = _FORK_MARK if forked else ""
     tail = _GONE_MARK if dir_gone else ""
