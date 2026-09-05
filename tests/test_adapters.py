@@ -173,92 +173,104 @@ class GeminiParserTests(unittest.TestCase):
         self.assertEqual([], rows)
 
 
-def write_cursor(chat_id="chat-abc", blobs=(), title="Fixture Chat", cwd="/work/repo"):
+def write_cursor(chat_id="chat-abc", turns=(), project="tmp", title=None):
+    """A Cursor transcript: <project>/agent-transcripts/<id>/<id>.jsonl, one json per line."""
     root = tempfile.mkdtemp()
-    chat = os.path.join(root, chat_id)
+    chat = os.path.join(root, project, "agent-transcripts", chat_id)
     os.makedirs(chat)
-    with open(os.path.join(chat, "meta.json"), "w") as fh:
-        json.dump({"schemaVersion": 1, "title": title, "cwd": cwd,
-                   "createdAtMs": 1767225600000, "updatedAtMs": 1767225900000}, fh)
-    db = os.path.join(chat, "store.db")
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
-    for i, b in enumerate(blobs):
-        payload = b if isinstance(b, bytes) else json.dumps(b).encode()
-        conn.execute("INSERT INTO blobs VALUES (?, ?)", ("b%d" % i, payload))
-    conn.commit()
-    conn.close()
-    return db
+    path = os.path.join(chat, chat_id + ".jsonl")
+    with open(path, "w") as fh:
+        for entry in turns:
+            fh.write(json.dumps(entry) + "\n")
+    if title is not None:
+        ag._CURSOR_TITLES = {chat_id: title}
+    else:
+        ag._CURSOR_TITLES = {}
+    return path
+
+
+def cursor_turn(role, text):
+    return {"role": role, "message": {"content": [{"type": "text", "text": text}]}}
 
 
 class CursorParserTests(unittest.TestCase):
+    def tearDown(self):
+        ag._CURSOR_TITLES = None
+
     def test_rows_use_the_shared_schema(self):
-        db = write_cursor(blobs=[
-            {"role": "user", "content": "why is the badge count wrong"},
-            {"role": "assistant", "content": "the filter runs before the join"},
-        ])
+        db = write_cursor(turns=[
+            cursor_turn("user", "<user_query>why is the badge count wrong</user_query>"),
+            cursor_turn("assistant", "the filter runs before the join"),
+        ], title="Badge Discrepancy")
         sid, rows = ag.parse_cursor_session(db)
         self.assertEqual("chat-abc", sid)
         self.assertEqual(2, len(rows))
         for i, r in enumerate(rows):
             self.assertEqual(9, len(r))
             self.assertEqual("chat-abc", r[C_SID])
-            self.assertEqual("/work/repo", r[C_CWD])
-            self.assertEqual("Fixture Chat", r[C_TITLE])
+            self.assertEqual("Badge Discrepancy", r[C_TITLE])
             self.assertEqual(str(i), r[C_SEQ])
+            self.assertTrue(r[C_TS].startswith("20"))
         self.assertEqual(["user", "assistant"], [r[C_ROLE] for r in rows])
 
     def test_session_id_is_the_resume_handle(self):
-        """`cursor-agent --resume <chatId>` takes the directory name, so that is what the row
-        must be keyed by."""
+        """`cursor-agent --resume <chatId>` takes the file stem, so that is the row key."""
         db = write_cursor(chat_id="7f3f46c7-7c48-43ba-9bd2-8ace1dd6b058",
-                          blobs=[{"role": "user", "content": "hi"}])
+                          turns=[cursor_turn("user", "hi")])
         sid, _rows = ag.parse_cursor_session(db)
         self.assertEqual("7f3f46c7-7c48-43ba-9bd2-8ace1dd6b058", sid)
 
-    def test_non_message_blobs_are_ignored(self):
-        """The blobs table also holds binary merkle nodes, embedded images and the system
-        prompt. None of them are conversation."""
-        db = write_cursor(blobs=[
-            b"\xff\xd8\xff\xe0\x00\x10JFIF binary image",
-            b"\n \x9e\x97d\x9d\x8f\xf5(\xab\xe7 merkle node",
-            {"role": "system", "content": "You are a coding assistant. " * 50},
-            {"role": "user", "content": "the only real turn"},
-        ])
+    def test_user_turn_is_the_query_not_its_wrapper(self):
+        """Cursor surrounds what was typed with attachments, timestamps and skill lists.
+        Indexed whole, those swamp the prompt and become the session title."""
+        db = write_cursor(turns=[cursor_turn("user",
+            "[Image]\n<timestamp>Monday, Aug 3, 2026</timestamp>\n"
+            "<user_query>\nfix the retry backoff\n</user_query>")])
+        _sid, rows = ag.parse_cursor_session(db)
+        self.assertEqual("fix the retry backoff", rows[0][C_TEXT])
+
+    def test_tags_with_attributes_are_stripped(self):
+        """The first pattern matched bare tags only, so `<hooks_context description="...">`
+        survived and ~50 sessions were titled with injected hook context."""
+        db = write_cursor(turns=[cursor_turn("assistant",
+            '<hooks_context description="Additional context provided by session hooks">'
+            'noise</hooks_context> the real answer')])
+        _sid, rows = ag.parse_cursor_session(db)
+        self.assertEqual("the real answer", rows[0][C_TEXT])
+        self.assertNotIn("hooks_context", rows[0][C_TEXT])
+
+    def test_status_entries_are_not_turns(self):
+        db = write_cursor(turns=[{"type": "status", "status": "running"},
+                                 {"error": "boom"},
+                                 cursor_turn("user", "the only real turn")])
         _sid, rows = ag.parse_cursor_session(db)
         self.assertEqual(["the only real turn"], [r[C_TEXT] for r in rows])
 
-    def test_injected_context_is_stripped_from_user_turns(self):
-        """Cursor prepends environment blocks to the user turn. Indexed, they make every
-        session match 'OS Version' and bury what the human typed."""
-        db = write_cursor(blobs=[{
-            "role": "user",
-            "content": "<user_info>\nOS Version: darwin 25.5.0\n</user_info>\n"
-                       "<workspace>/work/repo</workspace>\n"
-                       "actually fix the retry backoff",
-        }])
-        _sid, rows = ag.parse_cursor_session(db)
-        self.assertEqual("actually fix the retry backoff", rows[0][C_TEXT])
-
-    def test_every_row_carries_the_session_timestamp(self):
-        """Blob order is insertion order; per-message times were never recorded. group_sessions
-        takes the max row timestamp, so stamping updatedAtMs dates the session correctly
-        without inventing times."""
-        db = write_cursor(blobs=[{"role": "user", "content": "a"},
-                                 {"role": "assistant", "content": "b"}])
-        _sid, rows = ag.parse_cursor_session(db)
-        stamps = {r[C_TS] for r in rows}
-        self.assertEqual(1, len(stamps))
-        self.assertTrue(stamps.pop().startswith("20"))
-
-    def test_missing_store_is_skipped_not_fatal(self):
-        _sid, rows = ag.parse_cursor_session(os.path.join(tempfile.mkdtemp(), "store.db"))
-        self.assertEqual([], rows)
-
     def test_title_falls_back_to_the_first_user_turn(self):
-        db = write_cursor(title="", blobs=[{"role": "user", "content": "untitled chat topic"}])
+        db = write_cursor(turns=[cursor_turn("user", "untitled chat topic")], title=None)
         _sid, rows = ag.parse_cursor_session(db)
         self.assertEqual("untitled chat topic", rows[0][C_TITLE])
+
+    def test_missing_file_is_skipped_not_fatal(self):
+        _sid, rows = ag.parse_cursor_session(os.path.join(tempfile.mkdtemp(), "gone.jsonl"))
+        self.assertEqual([], rows)
+
+
+class UnslugTests(unittest.TestCase):
+    """Cursor names a project directory after its path with non-alphanumerics replaced by `-`,
+    which a real dash makes ambiguous. Resolve it against the filesystem, longest match first."""
+
+    def test_resolves_a_directory_containing_a_dash(self):
+        root = tempfile.mkdtemp()
+        target = os.path.join(root, "my-workspace", "sub")
+        os.makedirs(target)
+        slug = target.replace(os.sep, "-").strip("-")
+        ag._UNSLUG_CACHE.clear()
+        self.assertEqual(target, ag._unslug(slug))
+
+    def test_a_directory_that_is_gone_resolves_to_nothing(self):
+        ag._UNSLUG_CACHE.clear()
+        self.assertEqual("", ag._unslug("no-such-place-anywhere-12345"))
 
 
 def write_opencode(sessions):
@@ -375,16 +387,20 @@ class DiscoveryTests(unittest.TestCase):
     def test_each_harness_matches_only_its_own_files(self):
         """The walk used to accept `.jsonl` globally, which made every non-jsonl transcript
         invisible no matter what the source table said."""
-        cases = [("cc", "abc.jsonl", True), ("cc", "store.db", False),
-                 ("codex", "rollout.jsonl", True),
-                 ("gemini", "session-2026-01-01T00-00-ab.json", True),
-                 ("gemini", "logs.json", False),
-                 ("cursor", "store.db", True), ("cursor", "store.db-wal", False),
-                 ("cursor", "prompt_history.json", False),
-                 ("opencode", "opencode.db", True), ("opencode", "opencode.db-wal", False)]
-        for source, name, want in cases:
-            self.assertEqual(want, bool(ag.SOURCES[source]["match"](name)),
-                             "%s / %s" % (source, name))
+        cases = [
+            ("cc", "/p/abc.jsonl", True), ("cc", "/p/store.db", False),
+            ("codex", "/s/rollout.jsonl", True),
+            ("gemini", "/c/session-2026-01-01T00-00-ab.json", True),
+            ("gemini", "/c/logs.json", False),
+            # `<id>/<id>.jsonl` is the session; `<id>/subagents/<other>.jsonl` is not, and the
+            # two are indistinguishable by filename alone.
+            ("cursor", "/p/agent-transcripts/abc/abc.jsonl", True),
+            ("cursor", "/p/agent-transcripts/abc/subagents/def.jsonl", False),
+            ("cursor", "/p/agent-transcripts/abc/meta.json", False),
+            ("opencode", "/o/opencode.db", True), ("opencode", "/o/opencode.db-wal", False)]
+        for source, path, want in cases:
+            self.assertEqual(want, bool(ag.SOURCES[source]["match"](path)),
+                             "%s / %s" % (source, path))
 
 
 if __name__ == "__main__":

@@ -7,11 +7,11 @@ Every coding agent keeps its sessions on disk. Their native pickers search sessi
 across all of them at once, and drops you back into the session with that tool's own
 resume command.
 
-    claude     ~/.claude/projects        claude --resume
-    codex      ~/.codex/sessions         codex resume
-    cursor     ~/.cursor/chats           cursor-agent --resume
-    opencode   ~/.local/share/opencode   opencode --session
-    gemini     ~/.gemini/tmp             gemini --session-file
+    claude       ~/.claude/projects        claude --resume
+    codex        ~/.codex/sessions         codex resume
+    cursor cli   ~/.cursor/projects        cursor-agent --resume
+    opencode     ~/.local/share/opencode   opencode --session
+    gemini cli   ~/.gemini/tmp             gemini --session-file
 
 Usage:
     agsearch                       # interactive fuzzy TUI (needs fzf)
@@ -61,7 +61,8 @@ HOME = os.path.expanduser("~")
 PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
-CURSOR_DIR = os.path.join(HOME, ".cursor", "chats")
+CURSOR_DIR = os.path.join(HOME, ".cursor", "projects")
+CURSOR_CHATS_DIR = os.path.join(HOME, ".cursor", "chats")   # titles only; see _cursor_titles
 OPENCODE_DIR = os.path.join(HOME, ".local", "share", "opencode")
 CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "agsearch")
 FRAG_DIR = os.path.join(CACHE_DIR, "frag")
@@ -340,105 +341,132 @@ def parse_gemini_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
 
 # ------------------------------------------------------------------ cursor
 
-# Cursor keeps one directory per chat: meta.json (title, cwd, timestamps) beside a SQLite
-# store.db whose `blobs` table is content-addressed. Message blobs are plain json; the rest of
-# the table is binary merkle nodes and embedded images, which is why the scan filters on the
-# leading byte in SQL and never pulls the binary rows into Python.
-_CURSOR_JSON_BLOBS = "SELECT data FROM blobs WHERE substr(data, 1, 1) = x'7b'"
-_CURSOR_MAX_BLOBS = 5000
+# Cursor writes each session twice: a SQLite store under ~/.cursor/chats holding the raw API
+# payloads, and a clean JSONL transcript under ~/.cursor/projects/<slug>/agent-transcripts/.
+# The JSONL is the better source in every way that matters here. It covers more sessions (all
+# of the SQLite ones and more), it is ordered, and it carries only the conversation: the
+# SQLite copy also contains injected hook and environment context, which lands in the index as
+# session titles like `<hooks_context description="...">`.
 
-# Cursor injects context into the user turn the way Codex injects a preamble. Indexing it makes
-# every session match "OS Version" and buries what the human actually typed.
-_CURSOR_TAG_BLOCK = re.compile(r"^\s*<([a-z_]+)>.*?</\1>\s*", re.DOTALL)
+_CURSOR_QUERY = re.compile(r"<user_query>(.*?)</user_query>", re.DOTALL)
+# Tags carry attributes (`<hooks_context description="...">`), so a bare-tag pattern misses them.
+_CURSOR_TAG_BLOCK = re.compile(r"<([a-z_]+)(?:\s[^>]*)?>.*?</\1>", re.DOTALL)
 
 
-def _cursor_strip_context(text):
-    """Drop the leading <user_info>...</user_info> style blocks Cursor prepends to a user turn."""
+def _cursor_text(text, role):
+    """The words a human would recognise as the turn.
+
+    Cursor wraps what the user typed in <user_query>, and surrounds it with attachments,
+    timestamps and skill lists. Indexed whole, those swamp the actual prompt.
+    """
+    if role == "user":
+        found = _CURSOR_QUERY.findall(text)
+        if found:
+            return " ".join(f.strip() for f in found)
     prev = None
     while prev != text:
         prev = text
-        text = _CURSOR_TAG_BLOCK.sub("", text, count=1)
+        text = _CURSOR_TAG_BLOCK.sub(" ", text)
     return text
 
 
-def _cursor_meta(chat_dir):
-    try:
-        with open(os.path.join(chat_dir, "meta.json"), errors="replace") as fh:
-            m = json.load(fh)
-        return m if isinstance(m, dict) else {}
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}
+_UNSLUG_CACHE = {}
 
 
-def _sqlite_ro(path):
-    """Open a harness database without ever taking a write lock on one it may still be using."""
-    import sqlite3
-    for uri in ("file:%s?mode=ro" % path, "file:%s?immutable=1" % path):
-        try:
-            return sqlite3.connect(uri, uri=True, timeout=1.0)
-        except sqlite3.Error:
-            continue
-    return None
+def _unslug(slug):
+    """Turn a Cursor project directory name back into the path it was made from.
+
+    The name is the path with every non-alphanumeric replaced by `-`, which is not reversible
+    on its own: a real dash is indistinguishable from a separator. Resolve it against the
+    filesystem instead, taking the longest prefix that exists at each step. Returns "" for a
+    directory that is gone, which is a display gap, not a reason to skip the session.
+    """
+    if slug in _UNSLUG_CACHE:
+        return _UNSLUG_CACHE[slug]
+    parts = [p for p in slug.split("-") if p]
+    path, i = "", 0
+    while i < len(parts):
+        for j in range(len(parts), i, -1):
+            cand = path + os.sep + "-".join(parts[i:j])
+            if os.path.isdir(cand):
+                path, i = cand, j
+                break
+        else:
+            path = ""
+            break
+    _UNSLUG_CACHE[slug] = path
+    return path
+
+
+_CURSOR_TITLES = None
+
+
+def _cursor_titles():
+    """Chat id -> title, from the SQLite side's meta.json files.
+
+    The JSONL transcript has no title of its own, and Cursor's own titles read far better than
+    a truncated first prompt. Read once: there is one small file per chat.
+    """
+    global _CURSOR_TITLES
+    if _CURSOR_TITLES is None:
+        _CURSOR_TITLES = {}
+        for root, _dirs, files in os.walk(CURSOR_CHATS_DIR):
+            if "meta.json" not in files:
+                continue
+            try:
+                with open(os.path.join(root, "meta.json"), errors="replace") as fh:
+                    meta = json.load(fh)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(meta, dict) and meta.get("title"):
+                _CURSOR_TITLES[os.path.basename(root)] = _single_line(meta["title"], 90)
+    return _CURSOR_TITLES
 
 
 def parse_cursor_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
-    """Parse one Cursor chat (`.../<chatId>/store.db`) into the shared 9-field row schema.
+    """Parse one Cursor transcript into the shared 9-field row schema.
 
-    Keyed by the chat directory name, which is what `cursor-agent --resume <chatId>` takes.
-
-    Blob order: the conversation's real ordering lives in a binary root blob, and decoding that
-    format is not worth it. SQLite rowid is insertion order, which is the same thing in practice.
-    Every row carries the session's `updatedAtMs`, so `group_sessions` (which takes the max row
-    timestamp) dates the session correctly, and the stable sort in `load_session_rows` leaves
-    rowid order intact rather than inventing per-message times that were never recorded.
+    Keyed by the file stem, which is the chat id `cursor-agent --resume <id>` takes. The
+    transcript records no per-message time, so every row carries the file's mtime: that is when
+    the session was last written to, which is what the date column and the recency boost want.
     """
-    chat_dir = os.path.dirname(path)
-    sid = os.path.basename(chat_dir)
-    meta = _cursor_meta(chat_dir)
-    cwd = meta.get("cwd", "") or ""
-    title = _single_line(meta.get("title", "") or "", 90)
-
-    ms = meta.get("updatedAtMs") or meta.get("createdAtMs")
+    sid = os.path.splitext(os.path.basename(path))[0]
+    proj = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+    cwd = _unslug(proj)
     try:
-        ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ms / 1000.0)) if ms else ""
-    except (TypeError, ValueError, OSError):
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(os.path.getmtime(path)))
+    except (OSError, ValueError):
         ts = ""
 
-    conn = _sqlite_ro(path)
-    if conn is None:
-        return sid, []
     rows = []
     try:
-        cur = conn.execute(_CURSOR_JSON_BLOBS)
-        for n, (data,) in enumerate(cur):
-            if n >= _CURSOR_MAX_BLOBS:
-                break
-            try:
-                o = json.loads(bytes(data).decode("utf-8", "replace"))
-            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+        fh = open(path, errors="replace")
+    except OSError:
+        return sid, []
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
                 continue
-            if not isinstance(o, dict):
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
                 continue
             role = o.get("role")
-            if role not in ("user", "assistant"):      # `system` is the prompt, not the chat
+            if role not in ("user", "assistant"):     # status and error entries are not turns
                 continue
-            text = _flatten_content(o.get("content", ""))
-            if role == "user":
-                text = _cursor_strip_context(text)
-            text = _single_line(text, limit)
+            msg = o.get("message")
+            if not isinstance(msg, dict):
+                continue
+            text = _single_line(_cursor_text(_flatten_content(msg.get("content", "")), role),
+                                limit)
             if not text:
                 continue
-            rows.append([sid, cwd, "", ts, role, "", title, text])
-    except Exception:                  # a truncated or mid-write store is not worth crashing on
-        pass
-    finally:
-        conn.close()
+            rows.append([sid, cwd, "", ts, role, "", "", text])
 
+    title = _cursor_titles().get(sid, "")
     if not title:
-        for r in rows:
-            if r[4] == "user":
-                title = r[7][:90]
-                break
+        title = next((r[7][:90] for r in rows if r[4] == "user"), "")
     return sid, [[sid, r[1], r[2], r[3], r[4], str(i), title, r[7], "cli"]
                  for i, r in enumerate(rows)]
 
@@ -454,6 +482,17 @@ FROM part p JOIN message m ON p.message_id = m.id
 ORDER BY m.time_created, p.time_created, p.id
 """
 _OPENCODE_SESSIONS = "SELECT id, directory, title, time_updated FROM session"
+
+
+def _sqlite_ro(path):
+    """Open a harness database without ever taking a write lock on one it may still be using."""
+    import sqlite3
+    for uri in ("file:%s?mode=ro" % path, "file:%s?immutable=1" % path):
+        try:
+            return sqlite3.connect(uri, uri=True, timeout=1.0)
+        except sqlite3.Error:
+            continue
+    return None
 
 
 def _opencode_iso(ms):
@@ -508,20 +547,27 @@ def parse_opencode_session(path, include_thinking=False, limit=MSG_INDEX_CHARS):
 
 # ------------------------------------------------------------------ sources
 
-def _is_jsonl(name):
-    return name.endswith(".jsonl")
+def _is_jsonl(path):
+    return path.endswith(".jsonl")
 
 
-def _is_gemini_chat(name):
+def _is_gemini_chat(path):
+    name = os.path.basename(path)
     return name.startswith("session-") and name.endswith(".json")
 
 
-def _is_cursor_store(name):
-    return name == "store.db"
+def _is_cursor_transcript(path):
+    """`<id>/<id>.jsonl` is a session; `<id>/subagents/<other>.jsonl` is one of its subagents.
+
+    Only the filename used to be tested, and these two are indistinguishable by name alone.
+    """
+    if not path.endswith(".jsonl"):
+        return False
+    return os.path.splitext(os.path.basename(path))[0] == os.path.basename(os.path.dirname(path))
 
 
-def _is_opencode_db(name):
-    return name == "opencode.db"
+def _is_opencode_db(path):
+    return os.path.basename(path) == "opencode.db"
 
 
 # One record per harness, keyed by the source tag stored in index.json. Everything that used to
@@ -529,7 +575,7 @@ def _is_opencode_db(name):
 # plus a parser rather than an edit in five places that can silently disagree.
 #
 #   roots    directories to walk for transcripts
-#   match    filename predicate; harnesses do not agree on an extension
+#   match    path predicate; harnesses agree on neither the extension nor the layout
 #   parse    (path, include_thinking, limit) -> (sid, rows) in the shared 9-field schema
 #   label    the harness name, used for the source column, assistant turns and the preview
 #   colour   SGR code for the source column
@@ -551,15 +597,15 @@ SOURCES = {
     },
     "gemini": {
         "roots": [GEMINI_DIR], "match": _is_gemini_chat, "parse": None,
-        "label": "gemini", "colour": "36",
+        "label": "gemini cli", "colour": "36",
         # --resume takes a project-scoped index number, which is not a stable handle for a
         # session found by search. --session-file takes the transcript path, which is.
         "resume": ("path", ["gemini", "--session-file", "{path}"]),
         "subagents": False, "launch_dir": False,
     },
     "cursor": {
-        "roots": [CURSOR_DIR], "match": _is_cursor_store, "parse": None,
-        "label": "cursor", "colour": "32",
+        "roots": [CURSOR_DIR], "match": _is_cursor_transcript, "parse": None,
+        "label": "cursor cli", "colour": "32",
         "resume": ("id", ["cursor-agent", "--resume", "{sid}"]),
         "subagents": False, "launch_dir": False,
     },
@@ -808,8 +854,9 @@ def build_index(include_thinking=False, force=False):
                 continue
             for r, _dirs, fs in os.walk(root):
                 for fn in fs:
-                    if match(fn):
-                        files.append((os.path.join(r, fn), source, parser))
+                    full = os.path.join(r, fn)
+                    if match(full):
+                        files.append((full, source, parser))
 
     # Stat every file once up front: the same mtimes decide cache hits below and
     # tell us how many sessions actually need parsing, which is what we report.

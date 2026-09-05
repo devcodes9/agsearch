@@ -192,13 +192,16 @@ agsearch reads:
 | --- | --- | --- |
 | Claude Code | `~/.claude/projects/**/*.jsonl` | `claude --resume <id>` |
 | Codex | `~/.codex/sessions/**/*.jsonl` | `codex resume <id>` |
-| Cursor | `~/.cursor/chats/**/store.db` | `cursor-agent --resume <id>` |
+| Cursor CLI | `~/.cursor/projects/**/agent-transcripts/` | `cursor-agent --resume <id>` |
 | opencode | `~/.local/share/opencode/opencode.db` | `opencode --session <id>` |
 | Gemini CLI | `~/.gemini/tmp/**/chats/*.json` | `gemini --session-file <path>` |
 
-Cursor and opencode keep sessions in SQLite; agsearch opens those read-only and reads message
-records only. Gemini's `--resume` takes a project-scoped index number rather than a stable
-id, so resume goes through the transcript file instead.
+opencode keeps sessions in SQLite; agsearch opens it read-only and reads message records
+only. Gemini's `--resume` takes a project-scoped index number rather than a stable id, so
+resume goes through the transcript file instead.
+
+Cursor and Gemini are read from their CLI's storage. Chats made in the Cursor IDE are kept
+elsewhere and are not indexed, which is why the column names the CLI.
 
 Its cache lives under `~/.cache/agsearch/`. Transcript parsing and ranking happen locally, and
 only changed files are reparsed.
