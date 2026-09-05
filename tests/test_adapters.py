@@ -30,6 +30,13 @@ class RegistryTests(unittest.TestCase):
             self.assertTrue(callable(rec["parse"]), name)
             self.assertTrue(callable(rec["match"]), name)
 
+    def test_names_have_no_whitespace(self):
+        """The piped row is whitespace-separated columns. A harness whose name contains a
+        space shifts every field after it for anything reading them."""
+        for name, rec in ag.SOURCES.items():
+            self.assertEqual(rec["label"], rec["label"].strip(), name)
+            self.assertNotIn(" ", rec["label"], name)
+
     def test_names_are_unique(self):
         names = [r["label"] for r in ag.SOURCES.values()]
         self.assertEqual(len(names), len(set(names)))

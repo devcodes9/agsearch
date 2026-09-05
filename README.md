@@ -192,7 +192,7 @@ agsearch reads:
 | --- | --- | --- |
 | Claude Code | `~/.claude/projects/**/*.jsonl` | `claude --resume <id>` |
 | Codex | `~/.codex/sessions/**/*.jsonl` | `codex resume <id>` |
-| Cursor CLI | `~/.cursor/projects/**/agent-transcripts/` | `cursor-agent --resume <id>` |
+| cursor-cli | `~/.cursor/projects/**/agent-transcripts/` | `cursor-agent --resume <id>` |
 | opencode | `~/.local/share/opencode/opencode.db` | `opencode --session <id>` |
 | Gemini CLI | `~/.gemini/tmp/**/chats/*.json` | `gemini --session-file <path>` |
 

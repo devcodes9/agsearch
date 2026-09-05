@@ -9,9 +9,9 @@ resume command.
 
     claude       ~/.claude/projects        claude --resume
     codex        ~/.codex/sessions         codex resume
-    cursor cli   ~/.cursor/projects        cursor-agent --resume
+    cursor-cli   ~/.cursor/projects        cursor-agent --resume
     opencode     ~/.local/share/opencode   opencode --session
-    gemini cli   ~/.gemini/tmp             gemini --session-file
+    gemini-cli   ~/.gemini/tmp             gemini --session-file
 
 Usage:
     agsearch                       # interactive fuzzy TUI (needs fzf)
@@ -592,7 +592,9 @@ def _is_opencode_db(path):
 #   roots    directories to walk for transcripts
 #   match    path predicate; harnesses agree on neither the extension nor the layout
 #   parse    (path, include_thinking, limit) -> (sid, rows) in the shared 9-field schema
-#   label    the harness name, used for the source column, assistant turns and the preview
+#   label    the harness name, used for the source column, assistant turns and the preview.
+#            One whitespace-free token: the piped row is columns, and a name with a space in
+#            it shifts every field after it for anything parsing them.
 #   colour   SGR code for the source column
 #   resume   ("id", argv) substitutes {sid}; ("path", argv) substitutes {path}
 #   subagents   harness writes separate subagent transcripts that fold into the parent
@@ -612,7 +614,7 @@ SOURCES = {
     },
     "gemini": {
         "roots": [GEMINI_DIR], "match": _is_gemini_chat, "parse": None,
-        "label": "gemini cli", "colour": "36",
+        "label": "gemini-cli", "colour": "36",
         # --resume takes a project-scoped index number, which is not a stable handle for a
         # session found by search. --session-file takes the transcript path, which is.
         "resume": ("path", ["gemini", "--session-file", "{path}"]),
@@ -620,7 +622,7 @@ SOURCES = {
     },
     "cursor": {
         "roots": [CURSOR_DIR], "match": _is_cursor_transcript, "parse": None,
-        "label": "cursor cli", "colour": "32",
+        "label": "cursor-cli", "colour": "32",
         "resume": ("id", ["cursor-agent", "--resume", "{sid}"]),
         "subagents": False, "launch_dir": False,
     },
