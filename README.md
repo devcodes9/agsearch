@@ -97,6 +97,21 @@ This installs the latest release to `~/.local/bin`. Set `PREFIX` to change the d
 
 agsearch requires Python 3.9 or newer and has no Python package dependencies.
 
+### Updating
+
+```sh
+brew update && brew upgrade agsearch   # Homebrew
+uv tool upgrade agsearch               # uv
+pipx upgrade agsearch                  # pipx
+pip install -U agsearch                # pip
+```
+
+Re-run `install.sh` to update an install-script copy; it overwrites in place. `/plugin` updates
+the Claude Code skill.
+
+The first search after an update can rebuild the index, which takes a few seconds on a large
+corpus. That happens when a release changes how transcripts are parsed, and only once.
+
 ## Usage
 
 ```sh
