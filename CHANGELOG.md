@@ -11,6 +11,15 @@ migration in the same line.
 
 ## [Unreleased]
 
+### Added
+
+- **Sessions whose transcript was deleted stay searchable.** Claude Code deletes transcripts
+  after 30 days by default, and agsearch used to drop a session from its index the moment
+  the file went. It now keeps what it had indexed for 180 days: your messages and the agent's
+  replies, each cut to 2,000 characters, with no tool output and no automation runs. The
+  rows are marked `expired`, Enter and `agsearch read` open them read-only, and ctrl-y copies
+  the read command, since there is nothing left to resume.
+
 ### Fixed
 
 - **`agsearch read` no longer crashes on superscript digits.** A message containing `¹` or

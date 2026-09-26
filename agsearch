@@ -54,6 +54,7 @@ import json
 import shlex
 import time
 import shutil
+import datetime
 import hashlib
 import subprocess
 
@@ -71,6 +72,8 @@ SESSIONS_PATH = os.path.join(CACHE_DIR, "sessions.tsv")   # one line per session
 SUBMAP_PATH = os.path.join(CACHE_DIR, "submap.json")      # parent-sid -> [subagent file paths]
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")        # sid -> {source, path} for preview/resume
 FORKS_PATH = os.path.join(CACHE_DIR, "forks.json")        # forked sid -> {of, at}
+EXPIRED_DIR = os.path.join(CACHE_DIR, "expired")          # saved text of deleted transcripts
+EXPIRED_PATH = os.path.join(CACHE_DIR, "expired.json")    # fragment name -> {source, since}
 
 CACHE_FMT = 7   # bump when the TSV column layout / keying changes, to invalidate old fragments
 
@@ -106,6 +109,15 @@ W_BODY = 1.0
 # characters into a reply was simply absent from the index, so no amount of ranking could
 # surface it. 4,000 recovers that; 20,000 measured no better and costs more to scan.
 MSG_INDEX_CHARS = 4_000
+
+# Claude Code deletes transcripts after 30 days by default, and the session you want back to
+# learn how something was decided is usually older than that. So when a transcript disappears
+# its indexed text is kept, readable and searchable but no longer resumable. Only what someone
+# said is kept: tool output is two thirds of the index and not what anyone comes back for, and
+# every search reads the whole index, so what is kept has to stay small and has to end.
+EXPIRED_KEEP_DAYS = 180
+EXPIRED_MSG_CHARS = 2_000
+EXPIRED_ROLES = ("user", "assistant")
 
 RECENCY_HALFLIFE_DAYS = 45.0
 RECENCY_W = 0.35          # max multiplier bump for a session from today
@@ -777,6 +789,96 @@ def _frag_path(jsonl_path):
     return os.path.join(FRAG_DIR, key + ".tsv")
 
 
+def _slim_expired(frag_lines, live_sids):
+    """The part of a deleted transcript worth keeping: what you and the agent said, each
+    message cut to EXPIRED_MSG_CHARS, kind rewritten to "expired". Automation runs are dropped
+    whole, and so are rows of a session that is still live (a subagent file removed from under
+    a parent that is not)."""
+    out = []
+    for l in frag_lines:
+        f = (l.split(SEP) + [""] * 9)[:9]
+        if f[4] not in EXPIRED_ROLES or f[8] == "auto" or f[0] in live_sids:
+            continue
+        f[7] = f[7][:EXPIRED_MSG_CHARS]
+        f[8] = "expired"
+        out.append(SEP.join(f))
+    return out
+
+
+def _keep_expired(gone, live_frags, index, old_index, today=None):
+    """Save the text of transcripts that disappeared since the last run, drop what has been
+    kept longer than EXPIRED_KEEP_DAYS, and return the kept rows. Registers each kept session
+    in `index` with an `expired` date so preview, read and Enter know not to resume it.
+
+    A transcript that comes back (restored from a backup) is live again and its copy goes.
+    """
+    today = today or datetime.date.today()
+    os.makedirs(EXPIRED_DIR, exist_ok=True)
+    try:
+        kept = json.load(open(EXPIRED_PATH))
+    except (OSError, json.JSONDecodeError):
+        kept = {}
+
+    for path in gone:
+        fn = os.path.basename(_frag_path(path))
+        src = os.path.join(FRAG_DIR, fn)
+        if fn in kept or not os.path.exists(src):
+            continue
+        with open(src, errors="replace") as fh:
+            frag_lines = fh.read().splitlines()
+        slim = _slim_expired(frag_lines, index)
+        if not slim:
+            continue
+        sid0 = slim[0].split(SEP, 1)[0]
+        source = (old_index.get(sid0) or {}).get("source") or DEFAULT_SOURCE
+        with open(os.path.join(EXPIRED_DIR, fn), "w") as fh:
+            fh.write("\n".join(slim))
+        kept[fn] = {"source": source, "since": today.isoformat()}
+
+    cutoff = (today - datetime.timedelta(days=EXPIRED_KEEP_DAYS)).isoformat()
+    live = set(index)
+    lines = []
+    for fn in list(kept):
+        dst = os.path.join(EXPIRED_DIR, fn)
+        if fn in live_frags or kept[fn]["since"] < cutoff or not os.path.exists(dst):
+            kept.pop(fn)
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+            continue
+        with open(dst, errors="replace") as fh:
+            rows = [l for l in fh.read().splitlines() if l.split(SEP, 1)[0] not in live]
+        for sid in dict.fromkeys(l.split(SEP, 1)[0] for l in rows):
+            entry = index.setdefault(sid, {"source": kept[fn]["source"], "path": "",
+                                           "expired": kept[fn]["since"], "frags": []})
+            entry["frags"].append(fn)
+        lines.extend(rows)
+
+    json.dump(kept, open(EXPIRED_PATH, "w"))
+    return lines
+
+
+def _expired_rows(info):
+    """Saved rows of an expired session, as the 9-field lists a parser returns."""
+    rows = []
+    for fn in info.get("frags", []):
+        try:
+            with open(os.path.join(EXPIRED_DIR, fn), errors="replace") as fh:
+                rows += [(l.split(SEP) + [""] * 9)[:9] for l in fh.read().splitlines()]
+        except OSError:
+            continue
+    return rows
+
+
+def _expired_since(sid):
+    """The date `sid`'s transcript was found deleted, or "" if it is still on disk."""
+    try:
+        return json.load(open(INDEX_PATH)).get(sid, {}).get("expired", "")
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
 # A cold build over ~1,200 sessions takes several seconds. Silence for that long
 # reads as "hung" and is the cheapest bounce in the product, so we narrate it —
 # but only when there is real work and someone watching. Warm runs re-parse a
@@ -852,11 +954,16 @@ def build_index(include_thinking=False, force=False):
         old_index = json.load(open(INDEX_PATH))
     except (OSError, json.JSONDecodeError):
         old_index = {}
-    if os.path.exists(META_PATH) and not force:
-        try:
-            meta = json.load(open(META_PATH))
-        except (OSError, json.JSONDecodeError):
-            meta = {}
+    try:
+        meta = json.load(open(META_PATH))
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+    # Every file the last run indexed, read before a forced rebuild throws the cache away:
+    # the ones that have since disappeared are the transcripts whose text gets kept.
+    known_paths = [p for p in meta if not p.startswith("_")]
+    known_paths += [v["path"] for v in old_index.values() if v.get("path")]
+    if force:
+        meta = {}
     if meta.get("_thinking") != include_thinking or meta.get("_fmt") != CACHE_FMT:
         force = True          # thinking toggle or format change invalidates fragments
         meta = {}
@@ -925,6 +1032,9 @@ def build_index(include_thinking=False, force=False):
             if source == "cc":
                 root = (old_index.get(sid0) or {}).get("root")
                 index[sid0]["root"] = root or _root_uuid(path)
+
+    gone = {p for p in known_paths if p not in mtimes and not os.path.exists(p)}
+    lines.extend(_keep_expired(gone, live_frags, index, old_index))
 
     for fn in os.listdir(FRAG_DIR):     # drop fragments for deleted sessions
         if fn not in live_frags:
@@ -1017,14 +1127,15 @@ def _match_entry(f, matched, total, texts, keys, idlen=36, pad=True):
     spaces costs it a token.
     """
     tag = "auto" if f[C_KIND] == "auto" else _agent_name(f[C_SOURCE])
+    title = ("expired " if f[C_KIND] == "expired" else "") + f[C_TITLE][:60]
     badge = f"{matched}/{total}" if total else ""
     proj = short_proj(f[C_CWD])[:20]
     if pad:
         head = (f"{f[C_SID]}  {f[C_DATE]}  {tag:<{SOURCE_COL}} {badge:<4} "
-                f"\033[36m{proj:<20}\033[0m  {f[C_TITLE][:60]}")
+                f"\033[36m{proj:<20}\033[0m  {title}")
     else:
         head = (f"{f[C_SID][:idlen]} {f[C_DATE]} {tag} {badge} "
-                f"\033[36m{proj}\033[0m {f[C_TITLE][:60]}")
+                f"\033[36m{proj}\033[0m {title}")
     idx = best_matching(texts, keys)[0] if (keys and texts) else ()
     # Matched on the title alone (or no query at all): show what the session opened with.
     body = texts[idx[0]] if idx else f[C_FIRST]
@@ -1378,6 +1489,9 @@ def load_session_rows(sid, thinking=False, limit=MSG_INDEX_CHARS):
         index = {}
     info = index.get(sid, {})
     source = info.get("source", "cc")
+    if info.get("expired"):             # the transcript is gone; what agsearch kept is all there is
+        rows = sorted(_expired_rows(info), key=lambda r: r[3])
+        return source, [(r, False) for r in rows]
     path = info.get("path") or _session_path(sid)
 
     # Only some harnesses write separate subagent transcripts; the rest are a single file.
@@ -1437,6 +1551,13 @@ def _elide(blocks, budget, matched=()):
     return [blocks[i] for i in sorted(keep)], n - len(keep)
 
 
+def expired_note(since):
+    """What a reader of an expired session needs to know before trusting what they read."""
+    return (f"The transcript file was deleted (noticed {since}). This is agsearch's saved copy: "
+            f"your messages and the agent's replies, each cut to {EXPIRED_MSG_CHARS:,} "
+            f"characters, no tool output. It cannot be resumed.")
+
+
 def render_transcript(sid, thinking="0", query="", color=None, budget=None):
     """The whole conversation, readable, without resuming it.
 
@@ -1460,10 +1581,13 @@ def render_transcript(sid, thinking="0", query="", color=None, budget=None):
     r0 = rows[0]
     title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
     n_sub = sum(1 for _, sub in tagged if sub)
+    since = _expired_since(sid)
+    how = (f"\033[33m{expired_note(since)}\033[0m\n" if since
+           else f"\033[2m{resume_line(sid, r0[1])}\033[0m\n")
     out = [fork_mark(sid) + f"\033[1m{title[:80]}\033[0m",
            f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
            + (f" · {n_sub} subagent" if n_sub else "") + fork_line(sid) + "\033[0m",
-           f"\033[2m{resume_line(sid, r0[1])}\033[0m\n"]
+           how]
 
     blocks, matched = [], []
     for r, sub in tagged:
@@ -1508,6 +1632,8 @@ def render_preview(sid, thinking, query):
     disp_title = r0[6] or next((r[7] for r, _ in tagged if r[4] == "user"), "") or "(untitled)"
     print(fork_mark(sid) + f"\033[1m{disp_title[:80]}\033[0m")
     gone = " · orig dir gone" if r0[1] and not os.path.isdir(r0[1]) else ""
+    if _expired_since(sid):
+        gone = " · expired, read only"
     print(f"\033[2m{short_proj(r0[1])} · {r0[3][:10]} · {len(rows)} msgs"
           + (f" · {n_sub} subagent" if n_sub else "") + gone + fork_line(sid) + "\033[0m")
 
@@ -1780,6 +1906,8 @@ _GONE_MARK = "  \033[2morig dir gone\033[0m"
 # it costs nothing on the other 99% of rows, and every title starts in the same column, so the
 # marks still line up to be scanned. A word, not a glyph: ⑂ and ⋔ are unreadable at 14px.
 _FORK_MARK = "\033[2mfork\033[0m "
+# Same place and weight as the fork mark: it says, before Enter, that this row opens to read.
+_EXPIRED_MARK = "\033[2mexpired\033[0m "
 
 
 def _active_sids(sids):
@@ -1820,8 +1948,8 @@ def _row(sid, cwd, date, source, kind, title, badge, active=False, dir_gone=Fals
          forked=False):
     mark = _AUTO_MARK if kind == "auto" else _SRC_MARK.get(source, " " * SOURCE_COL)
     live = _LIVE_MARK if active else "  "
-    forkm = _FORK_MARK if forked else ""
-    tail = _GONE_MARK if dir_gone else ""
+    forkm = (_EXPIRED_MARK if kind == "expired" else "") + (_FORK_MARK if forked else "")
+    tail = _GONE_MARK if dir_gone and kind != "expired" else ""   # only matters to resume
     body = (f"{date}  {mark}  \033[36m{short_proj(cwd)[:15]:<15}\033[0m  "
             f"{badge} {live}{forkm}{title[:64]}{tail}")
     if kind == "auto":
@@ -2088,6 +2216,16 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
         return 0
     f = (sel.split(SEP) + [""] * 4)[:4]
     sid, cwd, active = f[0], f[1], f[3] == "1"
+    if _expired_since(sid):             # nothing to resume; open what was kept instead
+        if no_resume:
+            print(f"agsearch read {sid}")
+        else:
+            reader = subprocess.Popen([sys.executable, self, "_transcript", sid, thi, typed],
+                                      stdout=subprocess.PIPE)
+            subprocess.run(shlex.split(pager), stdin=reader.stdout)
+            reader.stdout.close()
+            reader.wait()
+        return 0
     if no_resume:
         _source, _bin, argv, _cwd, target, _exists = resume_plan(sid, cwd)
         print(resume_command(target or cwd, argv))
@@ -2128,7 +2266,8 @@ def main(argv):
         sid = argv[1] if len(argv) > 1 else ""
         cwd = argv[2] if len(argv) > 2 else ""
         if sid:
-            copy_to_clipboard(resume_line(sid, cwd))
+            copy_to_clipboard(f"agsearch read {sid}" if _expired_since(sid)
+                              else resume_line(sid, cwd))
         return 0
 
     no_fzf = no_resume = here = thinking = reindex = fuzzy = False
