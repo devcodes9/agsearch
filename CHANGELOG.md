@@ -9,6 +9,14 @@ While agsearch is on `0.x`, the CLI surface may still change between minor
 versions. Anything that changes it will be listed under **Changed** with the
 migration in the same line.
 
+## [Unreleased]
+
+### Fixed
+
+- **`agsearch read` no longer crashes on superscript digits.** A message containing `¹` or
+  `²` raised `ValueError` while condensing line numbers, because `isdigit()` accepts
+  characters `int()` cannot parse.
+
 ## [0.2.0] - 2026-09-05
 
 Four more coding agents, and the transcript reader stops attributing machine
