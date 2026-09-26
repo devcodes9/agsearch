@@ -94,6 +94,14 @@ class TranscriptTests(unittest.TestCase):
             self.assertIn("not found", buf.getvalue())
 
 
+class LineNumberCondenseTests(unittest.TestCase):
+    def test_superscript_digits_do_not_crash(self):
+        # "¹".isdigit() is True but int("¹") raises; a footnote marker crashed `read`.
+        ag = load_agsearch()
+        out = ag._condense_line_numbers("note ¹ 1 a 2 b 3 c 4 d ² end")
+        self.assertEqual(out, "note ¹ [file] d ² end")
+
+
 class BindingTests(unittest.TestCase):
     """ctrl-u and ctrl-d are fzf defaults (unix-line-discard, delete-char/eof).
     Rebinding them takes away "clear the query", which is the edit people reach

@@ -1190,10 +1190,10 @@ def _condense_line_numbers(s, minrun=4):
     toks = s.split(" ")
     out, i, n = [], 0, len(toks)
     while i < n:
-        if toks[i].isdigit():
+        if toks[i].isdecimal():
             last, chain = int(toks[i]), [i]
             for k in range(i + 1, n):
-                if toks[k].isdigit():
+                if toks[k].isdecimal():
                     v = int(toks[k])
                     if 0 < v - last <= 3:      # small gaps = blank lines in the file
                         last, _ = v, chain.append(k)
