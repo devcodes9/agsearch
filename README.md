@@ -232,8 +232,13 @@ Its cache lives under `~/.cache/agsearch/`. Transcript parsing and ranking happe
 only changed files are reparsed.
 
 > [!IMPORTANT]
-> Claude Code deletes transcripts after 30 days by default. To keep a longer searchable history,
-> set `cleanupPeriodDays` in `~/.claude/settings.json`:
+> Claude Code deletes transcripts after 30 days by default. When a transcript disappears,
+> agsearch keeps what it had indexed for 180 days: your messages and the agent's replies, each
+> cut to 2,000 characters, without tool output. Those sessions are marked `expired`. They are
+> still searchable and readable, and Enter opens them to read, but they cannot be resumed.
+>
+> To keep sessions resumable for longer, raise `cleanupPeriodDays` in `~/.claude/settings.json`
+> (heavy daily use writes about 700 MB of transcripts a month):
 >
 > ```json
 > { "cleanupPeriodDays": 365 }
@@ -248,6 +253,7 @@ only changed files are reparsed.
 - Sessions from deleted worktrees resume from the nearest existing parent directory.
 - Recently active sessions are marked `●` and require confirmation before reattaching.
 - Forked Claude Code sessions are marked `fork`, and name the branch they split from.
+- Sessions whose transcript was deleted are marked `expired` and open read-only.
 
 ## Development
 
