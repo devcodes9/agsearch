@@ -118,6 +118,10 @@ MSG_INDEX_CHARS = 4_000
 EXPIRED_KEEP_DAYS = 180
 EXPIRED_MSG_CHARS = 2_000
 EXPIRED_ROLES = ("user", "assistant")
+# Kept copies outlive the cache, so they carry their own layout version rather than CACHE_FMT,
+# which also bumps for parsing changes that leave the 9-field row alone. Bump this only when
+# the row layout changes; copies in an older layout are then dropped rather than misread.
+EXPIRED_FMT = 1
 
 RECENCY_HALFLIFE_DAYS = 45.0
 RECENCY_W = 0.35          # max multiplier bump for a session from today
@@ -805,12 +809,14 @@ def _slim_expired(frag_lines, live_sids):
     return out
 
 
-def _keep_expired(gone, live_frags, index, old_index, today=None):
+def _keep_expired(gone, live_frags, index, old_index, frags_current=True, today=None):
     """Save the text of transcripts that disappeared since the last run, drop what has been
     kept longer than EXPIRED_KEEP_DAYS, and return the kept rows. Registers each kept session
     in `index` with an `expired` date so preview, read and Enter know not to resume it.
 
     A transcript that comes back (restored from a backup) is live again and its copy goes.
+    `frags_current` is False when the fragments on disk predate a CACHE_FMT change: their
+    layout is then unknown, so nothing is saved from them.
     """
     today = today or datetime.date.today()
     os.makedirs(EXPIRED_DIR, exist_ok=True)
@@ -822,7 +828,7 @@ def _keep_expired(gone, live_frags, index, old_index, today=None):
     for path in gone:
         fn = os.path.basename(_frag_path(path))
         src = os.path.join(FRAG_DIR, fn)
-        if fn in kept or not os.path.exists(src):
+        if not frags_current or fn in kept or not os.path.exists(src):
             continue
         with open(src, errors="replace") as fh:
             frag_lines = fh.read().splitlines()
@@ -833,14 +839,18 @@ def _keep_expired(gone, live_frags, index, old_index, today=None):
         source = (old_index.get(sid0) or {}).get("source") or DEFAULT_SOURCE
         with open(os.path.join(EXPIRED_DIR, fn), "w") as fh:
             fh.write("\n".join(slim))
-        kept[fn] = {"source": source, "since": today.isoformat()}
+        kept[fn] = {"source": source, "since": today.isoformat(), "fmt": EXPIRED_FMT,
+                    # a subagent's copy, so read can label its turns as the subagent's
+                    "sub": _source(source)["subagents"]
+                           and os.path.basename(path).startswith("agent-")}
 
     cutoff = (today - datetime.timedelta(days=EXPIRED_KEEP_DAYS)).isoformat()
     live = set(index)
     lines = []
     for fn in list(kept):
         dst = os.path.join(EXPIRED_DIR, fn)
-        if fn in live_frags or kept[fn]["since"] < cutoff or not os.path.exists(dst):
+        if (fn in live_frags or kept[fn]["since"] < cutoff or not os.path.exists(dst)
+                or kept[fn].get("fmt") != EXPIRED_FMT):
             kept.pop(fn)
             try:
                 os.remove(dst)
@@ -852,7 +862,7 @@ def _keep_expired(gone, live_frags, index, old_index, today=None):
         for sid in dict.fromkeys(l.split(SEP, 1)[0] for l in rows):
             entry = index.setdefault(sid, {"source": kept[fn]["source"], "path": "",
                                            "expired": kept[fn]["since"], "frags": []})
-            entry["frags"].append(fn)
+            entry["frags"].append([fn, bool(kept[fn].get("sub"))])
         lines.extend(rows)
 
     json.dump(kept, open(EXPIRED_PATH, "w"))
@@ -860,12 +870,12 @@ def _keep_expired(gone, live_frags, index, old_index, today=None):
 
 
 def _expired_rows(info):
-    """Saved rows of an expired session, as the 9-field lists a parser returns."""
+    """Saved rows of an expired session as (9-field row, is_subagent), like load_session_rows."""
     rows = []
-    for fn in info.get("frags", []):
+    for fn, sub in info.get("frags", []):
         try:
             with open(os.path.join(EXPIRED_DIR, fn), errors="replace") as fh:
-                rows += [(l.split(SEP) + [""] * 9)[:9] for l in fh.read().splitlines()]
+                rows += [((l.split(SEP) + [""] * 9)[:9], sub) for l in fh.read().splitlines()]
         except OSError:
             continue
     return rows
@@ -962,6 +972,7 @@ def build_index(include_thinking=False, force=False):
     # the ones that have since disappeared are the transcripts whose text gets kept.
     known_paths = [p for p in meta if not p.startswith("_")]
     known_paths += [v["path"] for v in old_index.values() if v.get("path")]
+    frags_current = meta.get("_fmt") == CACHE_FMT
     if force:
         meta = {}
     if meta.get("_thinking") != include_thinking or meta.get("_fmt") != CACHE_FMT:
@@ -1034,7 +1045,7 @@ def build_index(include_thinking=False, force=False):
                 index[sid0]["root"] = root or _root_uuid(path)
 
     gone = {p for p in known_paths if p not in mtimes and not os.path.exists(p)}
-    lines.extend(_keep_expired(gone, live_frags, index, old_index))
+    lines.extend(_keep_expired(gone, live_frags, index, old_index, frags_current))
 
     for fn in os.listdir(FRAG_DIR):     # drop fragments for deleted sessions
         if fn not in live_frags:
@@ -1490,8 +1501,7 @@ def load_session_rows(sid, thinking=False, limit=MSG_INDEX_CHARS):
     info = index.get(sid, {})
     source = info.get("source", "cc")
     if info.get("expired"):             # the transcript is gone; what agsearch kept is all there is
-        rows = sorted(_expired_rows(info), key=lambda r: r[3])
-        return source, [(r, False) for r in rows]
+        return source, sorted(_expired_rows(info), key=lambda x: x[0][3])
     path = info.get("path") or _session_path(sid)
 
     # Only some harnesses write separate subagent transcripts; the rest are a single file.
@@ -2220,9 +2230,12 @@ def run_fzf(lines, query, thinking=False, no_resume=False, fuzzy=False):
         if no_resume:
             print(f"agsearch read {sid}")
         else:
+            # $PAGER is a shell command by convention (git runs it with sh -c too), and ctrl-o
+            # hands it to a shell through fzf, so Enter does the same. Only the pager goes to
+            # the shell; the session id and query are passed as arguments.
             reader = subprocess.Popen([sys.executable, self, "_transcript", sid, thi, typed],
                                       stdout=subprocess.PIPE)
-            subprocess.run(shlex.split(pager), stdin=reader.stdout)
+            subprocess.run(pager, shell=True, stdin=reader.stdout)
             reader.stdout.close()
             reader.wait()
         return 0

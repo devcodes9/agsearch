@@ -126,6 +126,39 @@ class ExpiredTests(unittest.TestCase):
         self.assertEqual(len(lines), 2)              # the live copy only, tool row included
         self.assertEqual(os.listdir(self.ag.EXPIRED_DIR), [])
 
+    def test_subagent_turns_stay_labelled_as_subagent(self):
+        write_session(self.projects, "s1", [("user", "main prompt")])
+        sub = os.path.join(self.projects, "agent-x1.jsonl")
+        with open(sub, "w") as fh:
+            fh.write(json.dumps({"type": "user", "sessionId": "s1", "cwd": "/repo",
+                                 "timestamp": "2026-08-01T11:00:00Z",
+                                 "message": {"role": "user", "content": "subagent task"}}))
+        self.ag.build_index()
+        os.remove(sub)
+        os.remove(os.path.join(self.projects, "s1.jsonl"))
+        self.ag.build_index()
+        _source, tagged = self.ag.load_session_rows("s1")
+        self.assertEqual([(r[7], s) for r, s in tagged],
+                         [("main prompt", False), ("subagent task", True)])
+
+    def test_copy_in_an_old_layout_is_dropped_not_misread(self):
+        self.expire("s1", [("user", "webhook retry")])
+        kept = json.load(open(self.ag.EXPIRED_PATH))
+        for v in kept.values():
+            v["fmt"] = self.ag.EXPIRED_FMT - 1
+        json.dump(kept, open(self.ag.EXPIRED_PATH, "w"))
+        self.assertEqual(self.ag.build_index(), [])
+        self.assertNotIn("s1", self.index())
+
+    def test_fragments_from_an_older_cache_format_are_not_saved(self):
+        path = write_session(self.projects, "s1", [("user", "webhook retry")])
+        self.ag.build_index()
+        meta = json.load(open(self.ag.META_PATH))
+        meta["_fmt"] = self.ag.CACHE_FMT - 1
+        json.dump(meta, open(self.ag.META_PATH, "w"))
+        os.remove(path)
+        self.assertEqual(self.ag.build_index(), [])
+
     def test_forced_rebuild_still_notices_the_deletion(self):
         path = write_session(self.projects, "s1", [("user", "webhook retry")])
         self.ag.build_index()
